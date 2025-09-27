@@ -62,19 +62,30 @@ err:
 
 /* Find VA from spt and return page. On error, return NULL. */
 struct page *
-spt_find_page (struct supplemental_page_table *spt UNUSED, void *va UNUSED) {
-	struct page *page = NULL;
-	/* TODO: Fill this function. */
+spt_find_page (struct supplemental_page_table *spt, void *va UNUSED) {
+	
+	struct page page;
+	page.va = va;
 
-	return page;
+	struct hash_elem *e = hash_find(&spt->h,&page.h_elem);
+	if(e != NULL){
+
+		struct page *page = hash_entry(e, struct page , h_elem);
+		return page;
+	}
+
+	return NULL;
 }
 
 /* Insert PAGE into spt with validation. */
 bool
-spt_insert_page (struct supplemental_page_table *spt UNUSED,
-		struct page *page UNUSED) {
+spt_insert_page (struct supplemental_page_table *spt ,
+		struct page *page ) {
 	int succ = false;
 	/* TODO: Fill this function. */
+	if(hash_insert(&spt->h, &page->h_elem) == NULL){
+		succ = true;
+	}
 
 	return succ;
 }
@@ -173,7 +184,9 @@ vm_do_claim_page (struct page *page) {
 
 /* Initialize new supplemental page table */
 void
-supplemental_page_table_init (struct supplemental_page_table *spt UNUSED) {
+supplemental_page_table_init (struct supplemental_page_table *spt) {
+	struct hash *spt_hash = &spt->h;
+	hash_init(spt_hash, page_hash_func, compare_hash_adrr, NULL);
 }
 
 /* Copy supplemental page table from src to dst */
@@ -187,4 +200,20 @@ void
 supplemental_page_table_kill (struct supplemental_page_table *spt UNUSED) {
 	/* TODO: Destroy all the supplemental_page_table hold by thread and
 	 * TODO: writeback all the modified contents to the storage. */
+}
+
+
+bool compare_hash_adrr(const struct hash_elem *a,const struct hash_elem *b, void *aux UNUSED){
+
+	struct page *p_a = hash_entry(a, struct page, h_elem);
+	struct page *p_b = hash_entry(b, struct page, h_elem);
+
+
+	return p_a->va > p_b->va;
+}
+
+unsigned page_hash_func(const struct hash_elem *elem, void *aux UNUSED){
+	const struct page *p = hash_entry(elem, struct page, h_elem);
+
+	return hash_bytes(&p->va, sizeof(p->va));
 }
