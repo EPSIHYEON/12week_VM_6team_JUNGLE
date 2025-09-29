@@ -43,6 +43,9 @@ uninit_new (struct page *page, void *va, vm_initializer *init,
 }
 
 /* Initalize the page on first fault */
+//SPT에 "uninit 상태"로 등록해둔 페이지를 실제 물리 프레임에 연결하면서 초기화하는 함수.
+// uninit_initialize 호출 후 anon_initializer 이거나 
+// uninit_initialize 호출 후 file_backed_initialize
 static bool
 uninit_initialize (struct page *page, void *kva) {
 	struct uninit_page *uninit = &page->uninit;
@@ -52,8 +55,8 @@ uninit_initialize (struct page *page, void *kva) {
 	void *aux = uninit->aux;
 
 	/* TODO: You may need to fix this function. */
-	return uninit->page_initializer (page, uninit->type, kva) &&
-		(init ? init (page, aux) : true);
+	return uninit->page_initializer (page, uninit->type, kva) && // uninit->page_initializer (page, uninit->type, kva) : 타입별 초기화기 준비 
+		(init ? init (page, aux) : true); //(init ? init (page, aux) : true) 데이터 채우기 단계 memset or file_read
 }
 
 /* Free the resources hold by uninit_page. Although most of pages are transmuted

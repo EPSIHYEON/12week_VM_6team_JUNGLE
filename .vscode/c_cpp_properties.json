@@ -6,7 +6,10 @@
                 "${workspaceFolder}/**",
                 "${workspaceFolder}/pintos"
             ],
-            "defines": [ "USERPROG"],
+            "defines": [
+                "VM",
+                "USERPROG"
+            ],
             "compilerPath": "/usr/bin/gcc",
             "cStandard": "c17",
             "cppStandard": "gnu++17",

@@ -49,12 +49,27 @@ vm_alloc_page_with_initializer (enum vm_type type, void *upage, bool writable,
 	struct supplemental_page_table *spt = &thread_current ()->spt;
 
 	/* Check wheter the upage is already occupied or not. */
+	//upage라는 주소를 가보았더니 아무것도 없다(채워 넣어도 된다)
 	if (spt_find_page (spt, upage) == NULL) {
 		/* TODO: Create the page, fetch the initialier according to the VM type,
 		 * TODO: and then create "uninit" page struct by calling uninit_new. You
 		 * TODO: should modify the field after calling the uninit_new. */
+			struct page *page = malloc(sizeof(struct page));
+			if(type == VM_ANON){
+			uninit_new(page,upage, init, type, aux,anon_initializer);
+			}
+			else if(type == VM_FILE){
+				uninit_new(page,upage, init, type, aux,file_backed_initializer);
+			}
+		page->writable = writable;
 
 		/* TODO: Insert the page into the spt. */
+		if(!spt_insert_page(spt,page)){
+			free(page);
+			return false;
+		}
+			
+		return true;
 	}
 err:
 	return false;
@@ -140,6 +155,7 @@ vm_handle_wp (struct page *page UNUSED) {
 }
 
 /* Return true on success */
+//최상위 핸들러, 페이지 폴트가 나면, 올바른 담당자에게 일을 분배 
 bool
 vm_try_handle_fault (struct intr_frame *f UNUSED, void *addr UNUSED,
 		bool user UNUSED, bool write UNUSED, bool not_present UNUSED) {
