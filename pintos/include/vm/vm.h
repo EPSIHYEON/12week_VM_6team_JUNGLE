@@ -113,6 +113,7 @@ void vm_dealloc_page(struct page *page);
 bool vm_claim_page(void *va);
 enum vm_type page_get_type(struct page *page);
 
+unsigned page_hash_func(const struct hash_elem *elem, void *aux UNUSED);
 bool compare_hash_adrr(const struct hash_elem *a, const struct hash_elem *b,
                        void *aux UNUSED);
 
