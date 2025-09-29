@@ -9,8 +9,6 @@
   },
   // clang-format 경로 (시스템 PATH에 없으면 직접 지정)
   "clang-format.executable": "clang-format",
-  // 사용할 스타일 (Google, LLVM, Chromium, Mozilla, WebKit, Microsoft, file)
-  "clang-format.style": "Google",
   "files.associations": {
     "thread.h": "c",
     "optional": "c",
@@ -35,6 +33,7 @@
     "chrono": "c",
     "cstdint": "c",
     "random": "c",
-    "string.h": "c"
+    "string.h": "c",
+    "hash.h": "c"
   }
 }

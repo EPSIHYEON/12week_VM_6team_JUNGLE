@@ -2,7 +2,8 @@
 #define VM_VM_H
 #include <stdbool.h>
 
-#include "include/lib/kernel/hash.h"
+#include "kernel/hash.h"
+#include "threads/mmu.h"
 #include "threads/palloc.h"
 
 enum vm_type {
@@ -29,7 +30,6 @@ enum vm_type {
 #include "vm/anon.h"
 #include "vm/file.h"
 #include "vm/uninit.h"
-
 #ifdef EFILESYS
 #include "filesys/page_cache.h"
 #endif
@@ -122,6 +122,7 @@ void vm_dealloc_page(struct page *page);
 bool vm_claim_page(void *va);
 enum vm_type page_get_type(struct page *page);
 
+unsigned page_hash_func(const struct hash_elem *elem, void *aux UNUSED);
 bool compare_hash_adrr(const struct hash_elem *a, const struct hash_elem *b,
                        void *aux UNUSED);
 
