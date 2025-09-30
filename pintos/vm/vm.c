@@ -291,8 +291,7 @@ static bool vm_do_claim_page(struct page *page) {
   frame->page = page;
   page->frame = frame;
 
-  if (!pml4_set_page(thread_current()->pml4, page->va, frame->kva, page->writable))
-    return false;
+  if (!pml4_set_page(thread_current()->pml4, page->va, frame->kva, page->writable)) return false;
 
   return swap_in(page, frame->kva);  // 페이지 타입별 swap_in 구현이 실제 초기화 작업을 수행.
 }
@@ -306,7 +305,30 @@ void supplemental_page_table_init(struct supplemental_page_table *spt) {
 /* Copy supplemental page table from src to dst */
 bool supplemental_page_table_copy(struct supplemental_page_table *dst UNUSED,
                                   struct supplemental_page_table *src UNUSED) {
-  return false;  // 아직 구현되지 않았음을 명시적으로 알림.
+  struct hash_iterator *i;
+  struct hash *dst_h = &dst->h;
+  struct hash *src_h = &src->h;
+
+  hash_first(i, src_h);
+  while (hash_next(&i)) {
+    struct page *parent_page = hash_entry(hash_cur(&i), struct page, h_elem);
+    enum vm_type type = page_get_type(parent_page);
+    void *upage = parent_page->va;
+    bool writable = parent_page->writable;
+
+    switch (type) {
+      case VM_UNINIT:
+        // vm_alloc_page_with_initializer(type, upage, writable, , NULL);
+        break;
+
+      case VM_ANON:
+        break;
+      case VM_FILE:
+        break;
+    }
+  }
+
+  return false;  //아직 구현되지 않았음을 명시적으로 알림
 }
 
 /* Free the resource hold by the supplemental page table */
