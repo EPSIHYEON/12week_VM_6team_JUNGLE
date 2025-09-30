@@ -289,8 +289,8 @@ int process_wait(tid_t child_tid) {
     return -1;
   } else {
     // printf("t는 있어요.");
-    sema_down(&t->wait_sema);        // 커널이 BLOCK
-    int status = t->exit_status;     // RUNNING 중 정보 먹음
+    sema_down(&t->wait_sema);     // 커널이 BLOCK
+    int status = t->exit_status;  // RUNNING 중 정보 먹음
     list_remove(&t->children_elem);  // 이제 유저프로그램 정보 필요 없어
     sema_up(&t->exit_sema);          // 좀비 프로세스 깨워
 
@@ -303,7 +303,12 @@ int process_wait(tid_t child_tid) {
 /* Exit the process. This function is called by thread_exit (). */
 void process_exit(void) {
   struct thread *curr = thread_current();
+  // 실행중인 프로그램 파일 닫기 전에 쓰기 금지를 해제
+  if (curr->running_file != NULL) {
+    file_allow_write(curr->running_file);
   file_close(curr->running_file);
+    curr->running_file = NULL;
+  }
 
   for (int fd = 2; fd < FDT_SIZE; fd++) {
     if (curr->fdt[fd] != NULL) {
@@ -318,7 +323,7 @@ void process_exit(void) {
    * TODO: We recommend you to implement process resource cleanup here. */
   // printf("process_exit ");
 
-  sema_up(&curr->wait_sema);    // 세마 up 하고 좀비 프로세스가 됨
+  sema_up(&curr->wait_sema);  // 세마 up 하고 좀비 프로세스가 됨
   sema_down(&curr->exit_sema);  //그 뒤에 BLOCK되서 커널이 깨워줘야 함
   process_cleanup();
 }
@@ -414,16 +419,18 @@ struct ELF64_PHDR {
 
 static bool setup_stack(struct intr_frame *if_);
 static bool validate_segment(const struct Phdr *, struct file *);
-static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t read_bytes,
-                         uint32_t zero_bytes, bool writable);
+static bool load_segment(struct file *file, off_t ofs, uint8_t *upage,
+                         uint32_t read_bytes, uint32_t zero_bytes,
+                         bool writable);
 
 /* Loads an ELF executable from FILE_NAME into the current thread.
  * Stores the executable's entry point into *RIP
  * and its initial stack pointer into *RSP.
  * Returns true if successful, false otherwise. */
-static bool load(const char *file_name,
-                 struct intr_frame *if_) {  //커널 모드에서 유저모드로 전환하기 위해
-                                            //(유저)스택에 메모리를 할당하는 과정
+static bool load(
+    const char *file_name,
+    struct intr_frame *if_) {  //커널 모드에서 유저모드로 전환하기 위해
+                               //(유저)스택에 메모리를 할당하는 과정
   struct thread *t = thread_current();
   struct ELF ehdr;
   struct file *file = NULL;
@@ -466,7 +473,8 @@ static bool load(const char *file_name,
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
       memcmp(ehdr.e_ident, "\177ELF\2\1\1", 7) || ehdr.e_type != 2 ||
       ehdr.e_machine != 0x3E  // amd64
-      || ehdr.e_version != 1 || ehdr.e_phentsize != sizeof(struct Phdr) || ehdr.e_phnum > 1024) {
+      || ehdr.e_version != 1 || ehdr.e_phentsize != sizeof(struct Phdr) ||
+      ehdr.e_phnum > 1024) {
     printf("load: %s: error loading executable\n", file_name);
     goto done;
   }
@@ -505,14 +513,16 @@ static bool load(const char *file_name,
             /* Normal segment.
              * Read initial part from disk and zero the rest. */
             read_bytes = page_offset + phdr.p_filesz;
-            zero_bytes = (ROUND_UP(page_offset + phdr.p_memsz, PGSIZE) - read_bytes);
+            zero_bytes =
+                (ROUND_UP(page_offset + phdr.p_memsz, PGSIZE) - read_bytes);
           } else {
             /* Entirely zero.
              * Don't read anything from disk. */
             read_bytes = 0;
             zero_bytes = ROUND_UP(page_offset + phdr.p_memsz, PGSIZE);
           }
-          if (!load_segment(file, file_page, (void *)mem_page, read_bytes, zero_bytes, writable))
+          if (!load_segment(file, file_page, (void *)mem_page, read_bytes,
+                            zero_bytes, writable))
             goto done;
         } else
           goto done;
@@ -552,7 +562,8 @@ static bool load(const char *file_name,
 
   // 실제값 스택에 넣기
   while (temp_num >= 0) {
-    if_->rsp -= strlen(args[temp_num]) + 1;  //길이 + \0 만큼 내리고 거기다가 공간 넣을 꺼임
+    if_->rsp -= strlen(args[temp_num]) +
+                1;  //길이 + \0 만큼 내리고 거기다가 공간 넣을 꺼임
     memcpy((void *)if_->rsp, args[temp_num], strlen(args[temp_num]) + 1);
     args_address[temp_num] = if_->rsp;
     temp_num--;
@@ -569,26 +580,32 @@ static bool load(const char *file_name,
 
   while (temp_num >= 0) {
     if_->rsp -= 8;
-    *(void **)if_->rsp = args_address[temp_num];  //주소값 자체를 8바이트 공간에 그냥 써넣는 것
+    *(void **)if_->rsp =
+        args_address[temp_num];  //주소값 자체를 8바이트 공간에 그냥 써넣는 것
     // args_address[temp_num] 라는 주소로 가서, 거기 있는 8바이트를 읽어서
     // 스택에 복사 그 주소는 우리가 접근할 수 없는 곳일 확률이 높음(memcpy가
     // 안되는 이유)
     temp_num--;
   }
 
-  if_->R.rdi = argc;                //총 갯수를 rdi에게 (0도 포함해야하기 때문에)
+  if_->R.rdi = argc;  //총 갯수를 rdi에게 (0도 포함해야하기 때문에)
   if_->R.rsi = (uint64_t)if_->rsp;  // 시작 주소를 rsi에게
 
   if_->rsp -= 8;
-  *(void **)if_->rsp = 0;  // main은 돌아갈 지점이 없기 때문에 거짓 주소를 반환해줌
+  *(void **)if_->rsp =
+      0;  // main은 돌아갈 지점이 없기 때문에 거짓 주소를 반환해줌
 
   success = true;
 
 done:
   /* We arrive here whether the load is successful or not. */
   palloc_free_page(fn_copy);
-
-  if (!success) file_close(file);
+  // 이미 file_deny_write()가 걸려 있었다면 이를 되돌린 뒤 파일을 닫도록 수정
+  if (!success && file != NULL) {
+    file_allow_write(file);
+    file_close(file);
+    t->running_file = NULL;
+  }
   return success;
 }
 
@@ -722,7 +739,8 @@ static bool install_page(void *upage, void *kpage, bool writable) {
 
   /* Verify that there's not already a page at that virtual
    * address, then map our page there. */
-  return (pml4_get_page(t->pml4, upage) == NULL && pml4_set_page(t->pml4, upage, kpage, writable));
+  return (pml4_get_page(t->pml4, upage) == NULL &&
+          pml4_set_page(t->pml4, upage, kpage, writable));
 }
 #else
 /* From here, codes will be used after project 3.
@@ -768,8 +786,9 @@ static bool lazy_load_segment(struct page *page, void *aux) {
  * or disk read error occurs. */
 //프로그램을 처음 디스크에서 읽어올 때, 실행 파일(ELF)에 명시된 초기 레이아웃을
 //설정하는 역할
-static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t read_bytes,
-                         uint32_t zero_bytes, bool writable) {
+static bool load_segment(struct file *file, off_t ofs, uint8_t *upage,
+                         uint32_t read_bytes, uint32_t zero_bytes,
+                         bool writable) {
   ASSERT((read_bytes + zero_bytes) % PGSIZE == 0);
   ASSERT(pg_ofs(upage) == 0);
   ASSERT(ofs % PGSIZE == 0);
@@ -787,7 +806,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
     if (aux == NULL) {
       return false;
     }
-    aux->file = file_reopen(file);
+    aux->file = file;
     aux->ofs = ofs;
     aux->read_bytes = page_read_bytes;
     aux->zero_bytes = page_zero_bytes;
