@@ -145,7 +145,7 @@ static void page_fault(struct intr_frame *f) {
          user ? "user" : "kernel");
   // kill (f);
   if (user) {
-    printf("heeellello");
+    //  printf("heeellello"); ?? 이거때매 테스트 펑펑
     exit(-1);
   }
 }
