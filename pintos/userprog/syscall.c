@@ -1,17 +1,22 @@
 #include "userprog/syscall.h"
+
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdbool.h>
 #include <syscall-nr.h>
+
+#include "filesys/directory.h"
+#include "filesys/filesys.h"
+#include "include/filesys/file.h"
+#include "include/userprog/process.h"
+#include "intrinsic.h"
+#include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
-#include "filesys/filesys.h"
-#include "filesys/directory.h"
-#include "userprog/gdt.h"
-#include "threads/flags.h"
-#include "include/userprog/process.h"
-#include "include/filesys/file.h"
-#include "intrinsic.h"
+#ifdef VM
+#include "vm/vm.h"
+#endif
 
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
@@ -46,6 +51,8 @@ void syscall_init(void) {
 }
 
 /* The main system call interface */
+static void validate_user_buffer(const void *buffer, unsigned size, bool writable);
+
 void syscall_handler(struct intr_frame *f UNUSED) {
   // TODO: Your implementation goes here.
   int syscall = f->R.rax;
@@ -103,7 +110,7 @@ void syscall_handler(struct intr_frame *f UNUSED) {
 }
 
 int write(int fd, const void *buffer, unsigned size) {
-  get_safe_buffer(buffer, size);
+  validate_user_buffer(buffer, size, false);
 
   if (fd < 0 || fd >= FDT_SIZE) {
     return -1;
@@ -221,7 +228,7 @@ int filesize(int fd) {
 }
 
 int read(int fd, void *buffer, unsigned size) {
-  get_safe_buffer(buffer, size);
+  validate_user_buffer(buffer, size, true);
   // printf("DEBUG fd_read: fd=%d, buffer=%p, size=%u\n", fd, buffer, size);
 
   if (size == 0) {
@@ -261,21 +268,44 @@ int read(int fd, void *buffer, unsigned size) {
   }
 }
 
-void get_safe_buffer(void *buffer, unsigned size) {
-  if (buffer == NULL || !is_user_vaddr(buffer)) {
-    exit(-1);
-  }
-  if (!is_user_vaddr(buffer + size - 1)) {
+static void validate_user_buffer(const void *buffer, unsigned size, bool writable) {
+  if (size == 0) return;
+
+  if (buffer == NULL) exit(-1);
+
+  const uint8_t *start = buffer;
+  uint64_t start_addr = (uint64_t)start;
+  uint64_t end_addr = start_addr + size - 1;
+
+  if (end_addr < start_addr) exit(-1);  // overflow guard
+
+  if (!is_user_vaddr((const void *)start_addr) || !is_user_vaddr((const void *)end_addr)) {
     exit(-1);
   }
 
-  //   void *ptr = pg_round_down(buffer);  //페이지의 초깃값
-  //   void *endptr = buffer + size - 1;
-  //   for (; ptr <= endptr; ptr += PGSIZE) {  //페이지 별로 확인
-  //     if (pml4_get_page(thread_current()->pml4, ptr) == NULL) {
-  //       exit(-1);
-  //     }
-  //   }
+#ifdef VM
+  struct thread *curr = thread_current();
+  struct supplemental_page_table *spt = &curr->spt;
+#endif
+
+  uint8_t *page_begin = (uint8_t *)pg_round_down((void *)start_addr);
+  uint8_t *page_end = (uint8_t *)pg_round_down((void *)end_addr);
+
+  for (uint8_t *addr = page_begin; addr <= page_end; addr += PGSIZE) {
+    if (!is_user_vaddr(addr)) exit(-1);
+
+#ifdef VM
+    struct page *page = spt_find_page(spt, addr);
+    if (page == NULL) exit(-1);
+    if (writable && !page->writable) exit(-1);
+
+    if (pml4_get_page(curr->pml4, addr) == NULL) {
+      if (!vm_claim_page(addr)) exit(-1);
+    }
+#else
+    if (pml4_get_page(thread_current()->pml4, addr) == NULL) exit(-1);
+#endif
+  }
 }
 
 void seek(int fd, unsigned position) {
