@@ -269,13 +269,24 @@ void get_safe_buffer(void *buffer, unsigned size) {
     exit(-1);
   }
 
-  //   void *ptr = pg_round_down(buffer);  //페이지의 초깃값
-  //   void *endptr = buffer + size - 1;
-  //   for (; ptr <= endptr; ptr += PGSIZE) {  //페이지 별로 확인
-  //     if (pml4_get_page(thread_current()->pml4, ptr) == NULL) {
-  //       exit(-1);
-  //     }
-  //   }
+#ifdef VM
+  void *ptr = pg_round_down(buffer);  //페이지의 초깃값
+  void *endptr = buffer + size - 1;
+  for (; ptr <= endptr; ptr += PGSIZE) {  //페이지 별로 확인
+    if (spt_find_page(&thread_current()->spt, ptr) == NULL) {
+      exit(-1);
+    }
+  }
+#else
+  void *ptr = pg_round_down(buffer);  //페이지의 초깃값
+  void *endptr = buffer + size - 1;
+  for (; ptr <= endptr; ptr += PGSIZE) {  //페이지 별로 확인
+    if (pml4_get_page(thread_current()->pml4, ptr) == NULL) {
+      exit(-1);
+    }
+  }
+
+#endif
 }
 
 void seek(int fd, unsigned position) {
