@@ -129,12 +129,18 @@ int write(int fd, const void *buffer, unsigned size) {
 }
 
 int exec(void *f_name) {
-  if (f_name == NULL || !is_user_vaddr(f_name) ||
-      pml4_get_page(thread_current()->pml4, f_name) == NULL) {
+  if (f_name == NULL || !is_user_vaddr(f_name)) {
     return -1;
   }
+  void *ptr = pg_round_down(f_name);  //페이지의 초깃값
+  if (spt_find_page(&thread_current()->spt, ptr) == NULL) {
+    exit(-1);
+  }
 
-  int num = process_exec(f_name);
+  char file_name[128];
+  memcpy(file_name, f_name, sizeof(file_name));
+
+  int num = process_exec(file_name);
 
   return num;
 }
