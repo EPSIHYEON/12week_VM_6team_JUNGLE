@@ -1,6 +1,5 @@
 #ifndef VM_ANON_H
 #define VM_ANON_H
-#include "vm/vm.h"
 struct page;
 enum vm_type;
 
@@ -11,7 +10,7 @@ struct anon_page {
 
 #define ANON_SWAP_SLOT_INVALID SIZE_MAX  // 스왑에 기록된 적이 없음을 나타내는 센티널 값.
 
-void vm_anon_init (void);
-bool anon_initializer (struct page *page, enum vm_type type, void *kva);
+void vm_anon_init(void);
+bool anon_initializer(struct page *page, enum vm_type type, void *kva);
 
 #endif

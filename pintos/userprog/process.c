@@ -303,12 +303,7 @@ int process_wait(tid_t child_tid) {
 /* Exit the process. This function is called by thread_exit (). */
 void process_exit(void) {
   struct thread *curr = thread_current();
-  // 실행중인 프로그램 파일 닫기 전에 쓰기 금지를 해제
-  if (curr->running_file != NULL) {
-    file_allow_write(curr->running_file);
-    file_close(curr->running_file);
-    curr->running_file = NULL;
-  }
+
   // 실행중인 프로그램 파일 닫기 전에 쓰기 금지를 해제
   if (curr->running_file != NULL) {
     file_allow_write(curr->running_file);

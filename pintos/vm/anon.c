@@ -9,11 +9,11 @@
 #include "vm/vm.h"
 
 /* DO NOT MODIFY BELOW LINE */
-static struct disk *swap_disk;  // 스왑 디스크 장치를 가리키는 포인터.
+static struct disk *swap_disk;      // 스왑 디스크 장치를 가리키는 포인터.
 static struct bitmap *swap_bitmap;  // 스왑 슬롯의 사용 여부를 표시하는 비트맵.
-static struct lock swap_lock;  // 스왑 슬롯 할당을 동기화하는 락.
-static size_t swap_slot_cnt;   // 사용 가능한 스왑 슬롯 개수.
-static size_t sectors_per_page;  // 한 페이지를 저장하는 데 필요한 섹터 수.
+static struct lock swap_lock;       // 스왑 슬롯 할당을 동기화하는 락.
+static size_t swap_slot_cnt;        // 사용 가능한 스왑 슬롯 개수.
+static size_t sectors_per_page;     // 한 페이지를 저장하는 데 필요한 섹터 수.
 static bool anon_swap_in(struct page *page, void *kva);
 static bool anon_swap_out(struct page *page);
 static void anon_destroy(struct page *page);
@@ -47,9 +47,9 @@ void vm_anon_init(void) {
     swap_bitmap = bitmap_create(swap_slot_cnt);
     if (swap_bitmap == NULL)
       PANIC("swap bitmap creation failed");  // 비트맵 생성 실패 시 즉시 중단.
-    lock_init(&swap_lock);  // 동시 스왑을 위한 락 초기화.
+    lock_init(&swap_lock);                   // 동시 스왑을 위한 락 초기화.
   } else {
-    swap_slot_cnt = 0;  // 스왑 디스크가 없으면 슬롯이 없음.
+    swap_slot_cnt = 0;   // 스왑 디스크가 없으면 슬롯이 없음.
     swap_bitmap = NULL;  // 스왑을 쓰지 않을 경우 비트맵을 비활성화.
   }
 }
@@ -71,7 +71,7 @@ bool anon_initializer(struct page *page, enum vm_type type, void *kva) {
   struct anon_page *anon_page = &page->anon;
   // 아직 스왑에 기록되지 않았음을 표시.
   anon_page->swap_slot = ANON_SWAP_SLOT_INVALID;
-  (void)kva;  // 프레임을 클레임하기 전까지 KVA는 사용되지 않음.
+  (void)kva;    // 프레임을 클레임하기 전까지 KVA는 사용되지 않음.
   return true;  // 초기화가 성공했음을 알림.
 }
 
@@ -81,11 +81,30 @@ static bool anon_swap_in(struct page *page, void *kva) {
 }
 
 /* Swap out the page by writing contents to the swap disk. */
-static bool anon_swap_out(struct page *page) {
-  struct anon_page *anon_page = &page->anon;
-}
+static bool anon_swap_out(struct page *page) { struct anon_page *anon_page = &page->anon; }
 
 /* Destroy the anonymous page. PAGE will be freed by the caller. */
 static void anon_destroy(struct page *page) {
-  struct anon_page *anon_page = &page->anon;
+  // 익명 페이지 메타데이터(스왑 슬롯 정보)
+  struct anon_page *anon = &page->anon;
+  struct thread *t = thread_current();
+
+  // 메모리에 적재된 상태였다면 프레임을 해제
+  if (page->frame != NULL) {
+    // pte 언매핑
+    if (pml4_get_page(t->pml4, page->va) != NULL) {
+      pml4_clear_page(t->pml4, page->va);
+    }
+    vm_free_frame(page->frame);
+    page->frame = NULL;
+  }
+  // 스왑 슬롯을 사용했다면 반환
+  if (swap_bitmap != NULL && anon->swap_slot != ANON_SWAP_SLOT_INVALID) {
+    lock_acquire(&swap_lock);
+    // 슬롯을 비어 있음으로 표시 (false)
+    bitmap_set(swap_bitmap, anon->swap_slot, false);
+    // 슬롯 번호를 초기화해 재사용을 방지
+    anon->swap_slot = ANON_SWAP_SLOT_INVALID;
+    lock_release(&swap_lock);
+  }
 }

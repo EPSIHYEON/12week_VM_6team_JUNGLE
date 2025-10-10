@@ -1,6 +1,7 @@
 #ifndef VM_VM_H
 #define VM_VM_H
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "kernel/hash.h"
 #include "threads/mmu.h"
@@ -26,18 +27,31 @@ enum vm_type {
   /* DO NOT EXCEED THIS VALUE. */
   VM_MARKER_END = (1 << 31),
 };
+#define VM_TYPE(type) ((type)&7)
 
-#include "vm/anon.h"
-#include "vm/file.h"
-#include "vm/uninit.h"
+// 전방 선언 (포인터 인자/필드에서 사용 가능)
+struct page;
+struct frame;
+struct page_operations;
+struct thread;
+
+// 자식 타입/초기화자 정의가 필요하므로 먼저 포함
+#include "vm/anon.h"    // struct anon_page
+#include "vm/file.h"    // struct file_page
+#include "vm/uninit.h"  // vm_initializer, struct uninit_page
 #ifdef EFILESYS
-#include "filesys/page_cache.h"
+#include "filesys/page_cache.h"  // struct page_cache
 #endif
 
 struct page_operations;
 struct thread;
 
-#define VM_TYPE(type) ((type)&7)
+struct aux {
+  struct file *file;
+  off_t ofs;
+  uint32_t read_bytes;
+  uint32_t zero_bytes;
+};
 
 struct aux {
   struct file *file;
@@ -58,6 +72,7 @@ struct page {
   /* Your implementation */
   struct hash_elem h_elem;
   bool writable;
+  struct list_elem aux_elem;
 
   /* Per-type data are binded into the union.
    * Each function automatically detects the current union */
@@ -110,20 +125,19 @@ bool spt_insert_page(struct supplemental_page_table *spt, struct page *page);
 void spt_remove_page(struct supplemental_page_table *spt, struct page *page);
 
 void vm_init(void);
-bool vm_try_handle_fault(struct intr_frame *f, void *addr, bool user,
-                         bool write, bool not_present);
+bool vm_try_handle_fault(struct intr_frame *f, void *addr, bool user, bool write, bool not_present);
+bool vm_try_stack_growth(void *addr, void *rsp_snapshot);
 
 #define vm_alloc_page(type, upage, writable) \
   vm_alloc_page_with_initializer((type), (upage), (writable), NULL, NULL)
-bool vm_alloc_page_with_initializer(enum vm_type type, void *upage,
-                                    bool writable, vm_initializer *init,
-                                    void *aux);
+bool vm_alloc_page_with_initializer(enum vm_type type, void *upage, bool writable,
+                                    vm_initializer *init, void *aux);
 void vm_dealloc_page(struct page *page);
 bool vm_claim_page(void *va);
 enum vm_type page_get_type(struct page *page);
+void vm_free_frame(struct frame *frame);
 
 uint64_t page_hash_func(const struct hash_elem *elem, void *aux UNUSED);
-bool compare_hash_adrr(const struct hash_elem *a, const struct hash_elem *b,
-                       void *aux UNUSED);
+bool compare_hash_adrr(const struct hash_elem *a, const struct hash_elem *b, void *aux UNUSED);
 
 #endif /* VM_VM_H */
