@@ -136,12 +136,18 @@ int write(int fd, const void *buffer, unsigned size) {
 }
 
 int exec(void *f_name) {
-  if (f_name == NULL || !is_user_vaddr(f_name) ||
-      pml4_get_page(thread_current()->pml4, f_name) == NULL) {
+  if (f_name == NULL || !is_user_vaddr(f_name)) {
     return -1;
   }
+  void *ptr = pg_round_down(f_name);  //페이지의 초깃값
+  if (spt_find_page(&thread_current()->spt, ptr) == NULL) {
+    exit(-1);
+  }
 
-  int num = process_exec(f_name);
+  char file_name[128];
+  memcpy(file_name, f_name, sizeof(file_name));
+
+  int num = process_exec(file_name);
 
   return num;
 }
@@ -282,30 +288,28 @@ static void validate_user_buffer(const void *buffer, unsigned size, bool writabl
   if (!is_user_vaddr((const void *)start_addr) || !is_user_vaddr((const void *)end_addr)) {
     exit(-1);
   }
-
-#ifdef VM
-  struct thread *curr = thread_current();
-  struct supplemental_page_table *spt = &curr->spt;
-#endif
-
-  uint8_t *page_begin = (uint8_t *)pg_round_down((void *)start_addr);
-  uint8_t *page_end = (uint8_t *)pg_round_down((void *)end_addr);
-
-  for (uint8_t *addr = page_begin; addr <= page_end; addr += PGSIZE) {
-    if (!is_user_vaddr(addr)) exit(-1);
-
-#ifdef VM
-    struct page *page = spt_find_page(spt, addr);
-    if (page == NULL) exit(-1);
-    if (writable && !page->writable) exit(-1);
-
-    if (pml4_get_page(curr->pml4, addr) == NULL) {
-      if (!vm_claim_page(addr)) exit(-1);
-    }
-#else
-    if (pml4_get_page(thread_current()->pml4, addr) == NULL) exit(-1);
-#endif
+  if (!is_user_vaddr(buffer + size - 1)) {
+    exit(-1);
   }
+
+#ifdef VM
+  void *ptr = pg_round_down(buffer);  //페이지의 초깃값
+  void *endptr = buffer + size - 1;
+  for (; ptr <= endptr; ptr += PGSIZE) {  //페이지 별로 확인
+    if (spt_find_page(&thread_current()->spt, ptr) == NULL) {
+      exit(-1);
+    }
+  }
+#else
+  void *ptr = pg_round_down(buffer);  //페이지의 초깃값
+  void *endptr = buffer + size - 1;
+  for (; ptr <= endptr; ptr += PGSIZE) {  //페이지 별로 확인
+    if (pml4_get_page(thread_current()->pml4, ptr) == NULL) {
+      exit(-1);
+    }
+  }
+
+#endif
 }
 
 void seek(int fd, unsigned position) {
