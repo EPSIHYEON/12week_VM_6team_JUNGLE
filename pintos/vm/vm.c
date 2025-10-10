@@ -5,6 +5,10 @@
 #include "kernel/hash.h"
 #include "threads/malloc.h"
 #include "vm/inspect.h"
+#include <string.h>
+
+#define STACK_MAX_BYTES (1 << 20) /* 1 MB stack limit. 스택 하한: USER_STACK - 1MB */
+#define STACK_HEURISTIC 32 /* RSP 근처 허용 거리(바이트). 너무 작으면 pusha류 테스트 실패 */
 
 /* Initializes the virtual memory subsystem by invoking each subsystem's
  * intialize codes. */
@@ -33,6 +37,10 @@ enum vm_type page_get_type(struct page *page) {
 }
 
 /* Helpers */
+/* 스택 성장 가능 여부 판단: 유저공간/상하한/near-RSP(32B)를 모두 검사 */
+static bool stack_growth_allowed(uint8_t *fault_addr, uint8_t *rsp_snapshot);
+/* 스택 성장 수행: fault 페이지 한 개를 UNINIT(ANON|MARKER)으로 SPT에 등록 */
+static bool vm_stack_growth(void *addr);
 static struct frame *vm_get_victim(void);
 static bool vm_do_claim_page(struct page *page);
 static struct frame *vm_evict_frame(void);
@@ -49,8 +57,7 @@ bool vm_alloc_page_with_initializer(enum vm_type type, void *upage, bool writabl
 
   struct supplemental_page_table *spt = &thread_current()->spt;
 
-  /* Check wheter the upage is already occupied or not. */
-  // upage라는 주소를 가보았더니 아무것도 없다(채워 넣어도 된다)
+  /* 이미 동일 VA가 SPT에 있으면 실패. 비어있으면 등록 가능 */
   if (spt_find_page(spt, upage) == NULL) {
     /* TODO: Create the page, fetch the initialier according to the VM type,
      * TODO: and then create "uninit" page struct by calling uninit_new. You
@@ -58,12 +65,18 @@ bool vm_alloc_page_with_initializer(enum vm_type type, void *upage, bool writabl
     struct page *page = malloc(sizeof(struct page));
     if (page == NULL) return false;
 
-    if (type == VM_ANON) {
+    // VM_ANON/VM_FILE 같은 원시 타입에 VM_MARKER_0 등 플래그를 제거하고 순수한 타입만 추출
+    enum vm_type primitive_type = VM_TYPE(type);
+    if (primitive_type == VM_ANON) {
       uninit_new(page, upage, init, type, aux, anon_initializer);
-    } else if (type == VM_FILE) {
+    } else if (primitive_type == VM_FILE) {
       uninit_new(page, upage, init, type, aux, file_backed_initializer);
+    } else {
+      // 지원하지 않는 타입에 대해 free
+      free(page);
+      return false;
     }
-    page->writable = writable;
+    page->writable = writable; /* 스택 페이지는 true 이어야 함 */
 
     /* TODO: Insert the page into the spt. */
     if (!spt_insert_page(spt, page)) {
@@ -150,37 +163,78 @@ static struct frame *vm_get_frame(void) {
   return frame;
 }
 
-/* Growing the stack. */
-/**
- * 페이지 폴트가 스택 영역에서 발생했고, 스택 확장 조건을 만족할 때
- * 해당 폴트 주소를 포함하는 한 개 이상의 익명 페이지를 할당,매핑하여 스택을 아래로 확장
- * addr : 폴트가 발생한 가상 주소
- */
-static void vm_stack_growth(void *addr) {
-  // 주소 유효성 검사
-  if (addr == NULL || !is_user_vaddr(addr)) return;
-  // 현재 스레드의 SPT
-  struct supplemental_page_table *spt = &thread_current()->spt;
-  // SPT의 키 (페이지 시작 주소)
-  void *page_addr = pg_round_down(addr);
-  // 1MB 하한을 계산. USER_STACK(스택 꼭대기)에서 1MB 내려간 주소가 최저 허용 주소
-  uint8_t *stack_limit = (uint8_t *)(USER_STACK - (1 << 20));
+void vm_free_frame(struct frame *frame) {
+  if (frame == NULL) return;
 
-  if ((uint8_t *)page_addr < stack_limit) return;  // 허용 범위를 벗어나면 확장하지 않음.
+  // TODO: 프레임 테이블 도입 시 락, 전역 자료구조, 핀 처리 구현
 
-  while ((uint8_t *)page_addr < (uint8_t *)USER_STACK) {
-    // 현재 page_addr 위치에 이미 페이지가 등록되어 있으면 중단
-    if (spt_find_page(spt, page_addr) != NULL) break;
-    // 해당 가상주소에 익명 페이지를 UNINIT 형태로 SPT에 등록. 쓰기 가능=true
-    if (!vm_alloc_page_with_initializer(VM_ANON, page_addr, true, NULL, NULL)) break;
-    // 방금 등록한 페이지를 즉시 클레임(프레임 할당 + PTE 매핑)
-    if (!vm_claim_page(page_addr)) break;
-    // 다음 페이지(더 위쪽 주소)로 이동
-    page_addr = (uint8_t *)page_addr + PGSIZE;
+  // 페이지와의 양방향 연결을 끊기
+  if (frame->page != NULL) {
+    if (frame->page->frame == frame) frame->page->frame = NULL;
+    frame->page = NULL;
   }
+  // 실제 물리 페이지 반환
+  palloc_free_page(frame->kva);
+  // 프레임 구조체 해제
+  free(frame);
+}
+
+/* Growing the stack. */
+/* 스택 성장을 허용할지 전체 조건을 검사한다. */
+static bool stack_growth_allowed(uint8_t *fault_addr, uint8_t *rsp_snapshot) {
+  /* 널 주소는 성장을 허용하지 않는다. */
+  if (fault_addr == NULL) return false;
+  /* 유저 영역 주소가 아니면 성장을 허용하지 않는다. */
+  if (!is_user_vaddr(fault_addr)) return false;
+  /* USER_STACK(스택 꼭대기) 이상이면 성장을 허용하지 않는다. */
+  if (fault_addr >= (uint8_t *)USER_STACK) return false;
+  /* USER_STACK - STACK_MAX_BYTES(1MB) 아래면 성장을 허용하지 않는다. */
+  if (fault_addr < (uint8_t *)USER_STACK - STACK_MAX_BYTES) return false;
+  /* 사용자 RSP 스냅샷이 없으면 near-RSP 판단이 불가능하므로 거부한다. */
+  if (rsp_snapshot == NULL) return false;
+
+  /* RSP 아래쪽으로 살짝 벗어난 접근만 허용: 너무 멀면 잘못된 접근으로 간주 */
+  if (fault_addr < rsp_snapshot) {
+    /* RSP와 fault 사이 거리(바이트)를 구한다. */
+    size_t diff = (size_t)(rsp_snapshot - fault_addr);
+    /* 허용 오차(STACK_HEURISTIC)를 넘으면 성장을 허용하지 않는다. */
+    if (diff > STACK_HEURISTIC) return false;
+  }
+
+  /* 모든 조건을 통과했으므로 성장을 허용한다. */
+  return true;
+}
+
+/* fault 주소가 속한 페이지 한 장을 UNINIT(ANON)으로 등록 */
+/* fault 주소가 속한 페이지 한 장을 스택으로 등록(UNINIT)한다. */
+static bool vm_stack_growth(void *addr) {
+  /* 널이거나 유저 영역이 아니면 스택 성장 대상이 아니다. */
+  if (addr == NULL || !is_user_vaddr(addr)) return false;
+
+  /* 현재 스레드의 SPT를 얻는다. */
+  struct supplemental_page_table *spt = &thread_current()->spt;
+  /* fault 주소를 페이지 경계로 내린다. */
+  void *page_addr = pg_round_down(addr);
+
+  /* 스택 하한(= USER_STACK - 1MB) 아래면 스택 성장을 허용하지 않는다. */
+  if ((uint8_t *)page_addr < (uint8_t *)USER_STACK - STACK_MAX_BYTES) return false;
+  /* USER_STACK(스택 꼭대기) 이상의 주소는 스택이 아니다. */
+  if ((uint8_t *)page_addr >= (uint8_t *)USER_STACK) return false;
+
+  /* 이미 같은 VA가 SPT에 있으면 별도 등록 없이 성공 처리한다. */
+  if (spt_find_page(spt, page_addr) != NULL) return true;
+
+  /* 해당 페이지를 익명 스택 페이지로 UNINIT 등록(writable=true). */
+  return vm_alloc_page_with_initializer(VM_ANON | VM_MARKER_0, page_addr, true, NULL, NULL);
+}
+
+/* 외부에서 성장 조건 판단 + 실제 등록을 한 번에 수행 */
+bool vm_try_stack_growth(void *addr, void *rsp_snapshot) {
+  return stack_growth_allowed((uint8_t *)addr, (uint8_t *)rsp_snapshot) && vm_stack_growth(addr);
 }
 
 /* Handle the fault on write_protected page */
+/* write-protect 폴트 처리: 현재 단계에선 CoW 미구현으로 실패 처리 */
 static bool vm_handle_wp(struct page *page) {
   if (page == NULL)  // 페이지 정보가 없으면 복구할 방법이 없습니다.
     return false;
@@ -205,27 +259,27 @@ static bool vm_handle_wp(struct page *page) {
  * - false : PTE는 있는데 잘못된 접근임
  * 읽기 전용 페이지에 쓰기 시도, 사용자 모드에서 커널 전용 페이지 접근 등
  */
-bool vm_try_handle_fault(struct intr_frame *f UNUSED, void *addr UNUSED, bool user UNUSED,
-                         bool write UNUSED, bool not_present UNUSED) {
-  // 현재 폴트를 일으킨 스레드
+/*
+ * 페이지 폴트 처리 흐름:
+ * 1) 주소/권한 필터링 (유저공간/상한/하한)
+ * 2) 권한 폴트면(write) WP 처리 시도 (현 단계는 실패)
+ * 3) not-present면 SPT 조회 → 없으면 스택 성장 조건 검사 + 등록
+ * 4) 프레임 보유 여부에 따라 pml4_set_page 또는 vm_do_claim_page 수행
+ */
+bool vm_try_handle_fault(struct intr_frame *f, void *addr, bool user, bool write,
+                         bool not_present) {
   struct thread *curr = thread_current();
-  // 스레드가 보유한 보조 페이지 테이블
   struct supplemental_page_table *spt = &curr->spt;
-  // 폴트 주소에 대응하는 페이지 객체를 담을 변수
+
+  if (addr == NULL) return false;
+  if (user && is_kernel_vaddr(addr)) return false;
+  if (!is_user_vaddr(addr)) return false;
+  if ((uint8_t *)addr >= (uint8_t *)USER_STACK) return false;
+
+  void *fault_page = pg_round_down(addr);
   struct page *page = NULL;
 
-  // 1. 잘못된 접근 필터링
-  // NULL 주소 접근
-  if (addr == NULL) return false;
-  // 사용자 모드에서 커널 영역 접근
-  if (user && is_kernel_vaddr(addr)) return false;
-  // 항상 유저 영역만 허용
-  if (!is_user_vaddr(addr)) return false;
-
-  // 폴트가 난 주소를 페이지 경계로 내림. SPT의 페이지 키값
-  void *fault_page = pg_round_down(addr);
-
-  // 2. PTE는 존재하지만 권한 문제 등으로 폴트가 난 경우
+  /* 권한 문제: r/o에 write 등 */
   if (!not_present) {
     if (write) {
       page = spt_find_page(spt, fault_page);
@@ -234,32 +288,27 @@ bool vm_try_handle_fault(struct intr_frame *f UNUSED, void *addr UNUSED, bool us
     return false;
   }
 
-  // 3. SPT 조회
-  // 우선 SPT에서 해당 주소의 페이지를 찾음
+  /* SPT에서 fault 페이지를 찾는다. */
   page = spt_find_page(spt, fault_page);
-  // 등록된 페이지가 없다면 스택 확장 여부를 검토
   if (page == NULL) {
-    // 폴트 당시의 스택 포인터를 결정
-    uint8_t *rsp = user ? (uint8_t *)f->rsp : (uint8_t *)curr->tf.rsp;
-    // 비교 연산을 위해 폴트 주소를 바이트 포인터로 변환
-    uint8_t *addr_u8 = (uint8_t *)addr;
-    // 임의로 1MB 크기의 스택 하한선을 설정
-    uint8_t *stack_lower_bound = (uint8_t *)(USER_STACK - (1 << 20));
-
-    // grow 가능 범위인지 확인
-    if (rsp != NULL && addr_u8 >= stack_lower_bound) {
-      // 스택 페이지를 새로 확보하도록 요청
-      vm_stack_growth(fault_page);
-      // 스택 확장 후 다시 페이지 객체를 확인
-      page = spt_find_page(spt, fault_page);
-    }
-    // 스택 확장까지 실패했다면 더 이상 처리할 방법이 없음
+    /* user 폴트면 f->rsp, syscalls 등 커널 컨텍스트 폴트면 스냅샷 사용 */
+    uint8_t *rsp_snapshot = user ? (uint8_t *)f->rsp : curr->user_rsp;
+    /* 조건을 만족하면 스택을 한 페이지 확장(UNINIT 등록)한다. */
+    if (!vm_try_stack_growth(addr, rsp_snapshot)) return false;
+    /* 확장 후 다시 SPT에서 페이지를 조회한다. */
+    page = spt_find_page(spt, fault_page);
+    /* 그래도 없다면 실패 처리한다. */
     if (page == NULL) return false;
   }
-  // 실제 프레임을 매핑하는 단계가 실패하면 폴트 처리 실패로 반환
-  if (!vm_do_claim_page(page)) return false;
-  // 모든 절차를 완료했으면 폴트 처리를 성공
-  return true;
+
+  /* 페이지가 이미 프레임을 보유: PTE 매핑만 하면 된다. */
+  if (page->frame != NULL) {
+    if (pml4_get_page(curr->pml4, page->va) != NULL) return true;
+    return pml4_set_page(curr->pml4, page->va, page->frame->kva, page->writable);
+  }
+
+  /* 프레임이 없다면 프레임을 할당하고 swap_in으로 내용을 채운다. */
+  return vm_do_claim_page(page);
 }
 
 /* Free the page.
@@ -271,13 +320,18 @@ void vm_dealloc_page(struct page *page) {
 
 /* Claim the page that allocate on VA. */
 /* 유저가상주소(va)에 대한 페이지를 찾아서 vm_do_claim_page()로 전달 */
+/* 외부에서 VA를 주면 SPT에서 찾아 프레임을 연결/매핑 */
 bool vm_claim_page(void *va) {
   struct page *page = NULL;
   /* TODO: Fill this function */
   struct supplemental_page_table *spt = &thread_current()->spt;
   page = spt_find_page(spt, va);
   /* 페이지 없는 경우 */
-  if (!page) return false;  // 등록된 페이지가 없으면 실패.
+  if (!page) return false;   // 등록된 페이지가 없으면 실패.
+  if (page->frame != NULL) { /* 프레임 이미 존재: 재매핑만 하면 됨 */
+    if (pml4_get_page(thread_current()->pml4, page->va) != NULL) return true;
+    return pml4_set_page(thread_current()->pml4, page->va, page->frame->kva, page->writable);
+  }
   return vm_do_claim_page(page);
 }
 
@@ -312,7 +366,10 @@ bool supplemental_page_table_copy(struct supplemental_page_table *dst,
   hash_first(&i, &src->h);  //부모 SPT를 순회
   while (hash_next(&i)) {
     struct page *parent_page = hash_entry(hash_cur(&i), struct page, h_elem);
-    enum vm_type type = page_get_type(parent_page);
+    enum vm_type type = parent_page->operations->type;
+    enum vm_type real_type = page_get_type(parent_page);
+    // printf("[!!!] But the value for switch is type = %d\n", real_type);
+    // printf("[!!!] But the value for switch is type = %d\n", type);
     void *upage = parent_page->va;
     bool writable = parent_page->writable;
 
@@ -321,7 +378,16 @@ bool supplemental_page_table_copy(struct supplemental_page_table *dst,
         /* UNINIT 페이지: 아직 물리 메모리에 로드되지 않은 페이지
          * 부모의 초기화 정보를 그대로 자식에게 물려줌 */
         struct uninit_page *uninit = &parent_page->uninit;
-        if (!vm_alloc_page_with_initializer(VM_UNINIT, upage, writable, uninit->init, uninit->aux))
+        // 부모 aux 복사
+        void *parent_aux = uninit->aux;
+        void *child_aux = NULL;
+        if (parent_aux != NULL) {
+          // aux가 어떤 구조체인지에 따라 크기를 알아야 함
+          size_t aux_size = sizeof(struct aux);  // 이걸 알아야 deep copy 가능
+          child_aux = malloc(aux_size);
+          memcpy(child_aux, parent_aux, aux_size);
+        }
+        if (!vm_alloc_page_with_initializer(real_type, upage, writable, uninit->init, child_aux))
           return false;
         break;
 
@@ -355,28 +421,50 @@ bool supplemental_page_table_copy(struct supplemental_page_table *dst,
   return true;
 }
 
-//보조 페이지 테이블(Supplemental Page Table, SPT)의 자원을 해제
 void supplemental_page_table_kill(struct supplemental_page_table *spt) {
   /* TODO: Destroy all the supplemental_page_table hold by thread and
    * TODO: writeback all the modified contents to the storage. */
-
+  if (spt == NULL) return;
+  if (hash_empty(&spt->h)) return;  // 비어있으면 바로 종료
+  struct list to_free;
+  list_init(&to_free);
   struct hash_iterator i;
-
-  for (hash_first(&i, &spt->h); hash_cur(&i);) {
+  hash_first(&i, &spt->h);
+  while (hash_next(&i)) {
     struct page *current_page = hash_entry(hash_cur(&i), struct page, h_elem);
-
-    //반복자를 안전하게 다음으로 미리 이동
-    hash_next(&i);
-
-    //저장해둔 current_page의 자원을 정리
-    destroy(current_page);
-    // hash에 current_page 제거
-    hash_delete(&spt->h, &current_page->h_elem);
-    // current_page 제거
-    free(current_page);
+    list_push_back(&to_free, &current_page->aux_elem);
+  }
+  while (!list_empty(&to_free)) {
+    struct list_elem *e = list_pop_front(&to_free);
+    struct page *page = list_entry(e, struct page, aux_elem);
+    // printf("[DEBUG] kill: va=%p, frame=%p, type=%d\n", page->va, page->frame,
+    // page_get_type(page));
+    destroy(page);
+    hash_delete(&spt->h, &page->h_elem);
+    free(page);
   }
 }
 
+// void supplemental_page_table_kill(struct supplemental_page_table *spt) {
+//   /* TODO: Destroy all the supplemental_page_table hold by thread and
+//    * TODO: writeback all the modified contents to the storage. */
+
+//   struct hash_iterator i;
+
+//   for (hash_first(&i, &spt->h); hash_cur(&i);) {
+//     struct page *current_page = hash_entry(hash_cur(&i), struct page, h_elem);
+
+//     //반복자를 안전하게 다음으로 미리 이동
+//     hash_next(&i);
+
+//     //저장해둔 current_page의 자원을 정리
+//     destroy(current_page);
+//     // hash에 current_page 제거
+//     hash_delete(&spt->h, &current_page->h_elem);
+//     // current_page 제거
+//     free(current_page);
+//   }
+// }
 uint64_t page_hash_func(const struct hash_elem *elem, void *aux UNUSED) {
   const struct page *p = hash_entry(elem, struct page, h_elem);
 
@@ -387,5 +475,5 @@ bool compare_hash_adrr(const struct hash_elem *a, const struct hash_elem *b, voi
   struct page *p_a = hash_entry(a, struct page, h_elem);
   struct page *p_b = hash_entry(b, struct page, h_elem);
 
-  return p_a->va > p_b->va;
+  return p_a->va < p_b->va;
 }

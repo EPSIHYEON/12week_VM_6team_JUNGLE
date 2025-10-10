@@ -38,6 +38,9 @@
     "deque": "c",
     "string": "c",
     "vector": "c",
-    "vm.h": "c"
+    "vm.h": "c",
+    "uninit.h": "c",
+    "palloc.h": "c",
+    "stdbool.h": "c"
   }
 }

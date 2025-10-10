@@ -37,17 +37,17 @@ static bool file_backed_swap_out(struct page *page) {
 
 /* Destory the file backed page. PAGE will be freed by the caller. */
 static void file_backed_destroy(struct page *page) {
-  struct file_page *file_page = &page->file;
+  struct file_page *file_page UNUSED = &page->file;
 
-  if (pml4_get_page(thread_current()->pml4, page->va) != NULL) {
-    pml4_clear_page(thread_current()->pml4, page->va);
-  }
+  // if (pml4_get_page(thread_current()->pml4, page->va) != NULL) {
+  //   pml4_clear_page(thread_current()->pml4, page->va);
+  // }
 
-  if (page->frame != NULL && pml4_is_dirty(thread_current()->pml4, page->va)) {
-    file_write_at(file_page->file, page->frame->kva, file_page->read_bytes, file_page->ofs);
-  }
+  // if (page->frame != NULL && pml4_is_dirty(thread_current()->pml4, page->va)) {
+  //   file_write_at(file_page->file, page->frame->kva, file_page->read_bytes, file_page->ofs);
+  // }
 
-  if (page->frame != NULL) vm_frame_free(page->frame);
+  // if (page->frame != NULL) vm_free_frame(page->frame);
 }
 
 /* Do the mmap */

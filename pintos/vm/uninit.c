@@ -8,9 +8,8 @@
  * function.
  * */
 
-#include "vm/uninit.h"
-
 #include "vm/vm.h"
+#include "vm/uninit.h"
 
 static bool uninit_initialize(struct page *page, void *kva);
 static void uninit_destroy(struct page *page);
@@ -63,7 +62,24 @@ static bool uninit_initialize(struct page *page, void *kva) {
  * exit, which are never referenced during the execution.
  * PAGE will be freed by the caller. */
 static void uninit_destroy(struct page *page) {
-  struct uninit_page *uninit UNUSED = &page->uninit;
-  /* TODO: Fill this function.
-   * TODO: If you don't have anything to do, just return. */
+  // UNINIT 전용 메타데이터
+  struct uninit_page *uninit = &page->uninit;
+
+  // UNINIT 상태에서는 프레임이 없어야 정상
+  ASSERT(page->frame == NULL);
+  if (page->frame != NULL) {
+    vm_free_frame(page->frame);  // 일관된 프레임 해제 경로를 통해 정리합니다.
+    page->frame = NULL;
+  }
+  // 지연 로딩용 보조 데이터(aux)가 없으면 정리할 것이 없음
+  if (uninit->aux == NULL) return;
+  // Lazy load를 위해 파일 포인터/오프셋/읽을 바이트 수 등의 정보를 aux에 담아 두는데
+  // 해당 페이지가 한 번도 클레임/폴트되지 않은 채로 정리되는 경우 메모리가 누수될 수 있음
+  // 따라서 UNINIT destroy에서 aux를 해제해 리소스 누수를 막음
+  free(uninit->aux);
+  // TODO: VM_FILE 등 다른 타입을 지원하게 되면 파일 핸들 정리를 추가
+
+  uninit->aux = NULL;               // 포인터를 비워 이중 해제를 방지
+  uninit->init = NULL;              // 추가 초기화 콜백도 제거
+  uninit->page_initializer = NULL;  // 타입별 초기화기 포인터 초기화
 }
