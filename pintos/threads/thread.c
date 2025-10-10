@@ -433,6 +433,7 @@ static void init_thread(struct thread *t, const char *name, int priority) {
   sema_init(&t->fork_sema, 0);
   list_init(&t->children_list);
   t->exit_status = 0;
+  t->user_rsp = NULL;
 
 #endif
 

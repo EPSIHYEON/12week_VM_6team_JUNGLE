@@ -132,6 +132,9 @@ static void page_fault(struct intr_frame *f) {
   user = (f->error_code & PF_U) != 0;
 
 #ifdef VM
+  if (user) {
+    thread_current()->user_rsp = (uint8_t *)f->rsp;
+  }
   /* For project 3 and later. */
   if (vm_try_handle_fault(f, fault_addr, user, write, not_present)) return;
 #endif

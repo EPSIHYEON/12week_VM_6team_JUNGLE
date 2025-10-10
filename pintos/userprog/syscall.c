@@ -55,6 +55,9 @@ static void validate_user_buffer(const void *buffer, unsigned size, bool writabl
 
 void syscall_handler(struct intr_frame *f UNUSED) {
   // TODO: Your implementation goes here.
+#ifdef VM
+  thread_current()->user_rsp = (uint8_t *)f->rsp;
+#endif
   int syscall = f->R.rax;
   switch (syscall) {
     case SYS_HALT:
@@ -274,44 +277,81 @@ int read(int fd, void *buffer, unsigned size) {
   }
 }
 
+/*
+ *   - 유저 포인터 `buffer`가 가리키는 [buffer, buffer+size) 구간이
+ *     유저 공간에 있고 접근 가능한지 확인하고, 필요 시 페이지를 클레임한다.
+ * 인자:
+ *   - buffer: 유저 영역 버퍼 시작 주소(유효한 유저 가상주소여야 함)
+ *   - size:   검사할 바이트 크기(0이면 즉시 반환)
+ *   - writable: true이면 쓰기 가능한 페이지인지 확인(쓰기 불가면 종료)
+ */
 static void validate_user_buffer(const void *buffer, unsigned size, bool writable) {
   if (size == 0) return;
 
+  /* 널 포인터는 잘못된 인자이므로 종료 */
   if (buffer == NULL) exit(-1);
 
-  const uint8_t *start = buffer;
+  /* 시작 주소를 바이트 포인터로 변환 */
+  const uint8_t *start = (const uint8_t *)buffer;
+  /* 64비트 정수로 시작 주소 저장 */
   uint64_t start_addr = (uint64_t)start;
+  /* 끝 주소 = 시작 + 크기 - 1 (포함 범위) */
   uint64_t end_addr = start_addr + size - 1;
 
-  if (end_addr < start_addr) exit(-1);  // overflow guard
+  /* overflow guard: 덧셈 오버플로우로 범위 역전되면 종료 */
+  if (end_addr < start_addr) exit(-1);
 
+  /* 전체 범위가 유저영역에 있어야 함 */
   if (!is_user_vaddr((const void *)start_addr) || !is_user_vaddr((const void *)end_addr)) {
     exit(-1);
   }
-  if (!is_user_vaddr(buffer + size - 1)) {
-    exit(-1);
-  }
+
+  /* 페이지 경계로 내린 시작/끝 페이지 주소 */
+  uint8_t *page_begin = (uint8_t *)pg_round_down((void *)start_addr);
+  uint8_t *page_end = (uint8_t *)pg_round_down((void *)end_addr);
 
 #ifdef VM
-  void *ptr = pg_round_down(buffer);  //페이지의 초깃값
-  void *endptr = buffer + size - 1;
-  for (; ptr <= endptr; ptr += PGSIZE) {  //페이지 별로 확인
-    if (spt_find_page(&thread_current()->spt, ptr) == NULL) {
-      exit(-1);
-    }
-  }
-#else
-  void *ptr = pg_round_down(buffer);  //페이지의 초깃값
-  void *endptr = buffer + size - 1;
-  for (; ptr <= endptr; ptr += PGSIZE) {  //페이지 별로 확인
-    if (pml4_get_page(thread_current()->pml4, ptr) == NULL) {
-      exit(-1);
-    }
-  }
-
+  struct thread *curr = thread_current();
+  struct supplemental_page_table *spt = &curr->spt;
 #endif
-}
 
+  /* page_begin부터 page_end까지 페이지 경계 단위로 순회(한 번에 PGSIZE씩 증가) */
+  for (uint8_t *addr = page_begin; addr <= page_end; addr += PGSIZE) {
+    if (!is_user_vaddr(addr)) exit(-1);
+
+#ifdef VM
+    /* 이 페이지에서 버퍼가 실제로 요구하는 마지막 바이트(스택 성장 판정에 사용) */
+    uint8_t *range_end = addr + PGSIZE - 1;
+    if (range_end > (uint8_t *)end_addr) range_end = (uint8_t *)end_addr;
+
+    /* 1) SPT에서 존재 검사 - 시현님 get_safe_buffer 해결 로직 아이디어 */
+    struct page *page = spt_find_page(spt, addr);
+
+    /* 2) 없으면 스택 성장 기회 부여 (syscall에서도 user RSP 스냅샷 사용) */
+    if (page == NULL) {
+      if (!vm_try_stack_growth(range_end, curr->user_rsp)) {
+        /* 성장 불가라면 잘못된 버퍼 */
+        exit(-1);
+      }
+      page = spt_find_page(spt, addr);
+      if (page == NULL) exit(-1);
+    }
+
+    /* 3) 쓰기 요청이면 writable 확인 */
+    if (writable && !page->writable) exit(-1);
+
+    /* 4) 아직 실제 매핑이 없다면 이제 매핑을 만든다 (lazy 상황 대비) */
+    if (pml4_get_page(curr->pml4, addr) == NULL) {
+      if (!vm_claim_page(addr)) exit(-1);
+    }
+#else
+    /* Project 2(비-VM) 환경: 실제 PML4 매핑만 확인 */
+    if (pml4_get_page(thread_current()->pml4, addr) == NULL) {
+      exit(-1);
+    }
+#endif
+  }
+}
 void seek(int fd, unsigned position) {
   if (fd < 2 || fd >= FDT_SIZE) {
     return -1;
