@@ -6,9 +6,15 @@
 #include "threads/malloc.h"
 #include "vm/inspect.h"
 #include <string.h>
+#include <stdio.h>
 
 #define STACK_MAX_BYTES (1 << 20) /* 1 MB stack limit. 스택 하한: USER_STACK - 1MB */
 #define STACK_HEURISTIC 32 /* RSP 근처 허용 거리(바이트). 너무 작으면 pusha류 테스트 실패 */
+
+/* 페이지 교체 알고리즘을 위한 전역변수 추가 */
+struct list frame_list;
+struct lock frame_lock;
+static struct list_elem *clock_pointer;
 
 /* Initializes the virtual memory subsystem by invoking each subsystem's
  * intialize codes. */
@@ -21,6 +27,9 @@ void vm_init(void) {
   register_inspect_intr();
   /* DO NOT MODIFY UPPER LINES. */
   /* TODO: Your code goes here. */
+  list_init(&frame_list);
+  lock_init(&frame_lock);
+  clock_pointer = NULL;
 }
 
 /* Get the type of the page. This function is useful if you want to know the
@@ -117,21 +126,69 @@ void spt_remove_page(struct supplemental_page_table *spt UNUSED, struct page *pa
   vm_dealloc_page(page);
 }
 
-/* Get the struct frame, that will be evicted. */
+/* 페이지 교체 알고리즘 : Clock 알고리즘
+ * LRU(Least Recently Used) 흉내내는 알고리즘으로 원형 리스트를 돌면서 최근에 접근한 적 없는
+ * 페이지를 선택 */
 static struct frame *vm_get_victim(void) {
-  struct frame *victim = NULL;
-  /* TODO: The policy for eviction is up to you. */
+  /* 리스트가 비어있는 경우 커널패닉 */
+  ASSERT(!list_empty(&frame_list));
 
-  return victim;
+  /* 전역변수 프레임 리스트에 대한 락 획득 */
+  lock_acquire(&frame_lock);
+  /* Clock 초기 위치 세팅 */
+  printf("\n[CLOCK] === start vm_get_victim ===\n");
+  // printf("[CLOCK] frame_list size=%zu\n", list_size(&frame_list));
+
+  if (clock_pointer == NULL || clock_pointer == list_end(&frame_list)) {
+    clock_pointer = list_begin(&frame_list);
+    // printf("[CLOCK] reset clock_pointer -> list_begin\n");
+  }
+  while (true) {
+    struct frame *victim = list_entry(clock_pointer, struct frame, elem);
+    struct page *page = victim->page;
+    struct thread *curr = thread_current();
+    /* 접근여부 검사 */
+    if (page != NULL) {
+      if (pml4_is_accessed(curr->pml4, page->va)) {
+        /* 최근 접근한 페이지는 한번 봐줌 */
+        pml4_set_accessed(curr->pml4, page->va, false);
+        // printf("[CLOCK] reset accessed bit for va=%p\n", page->va);
+      } else {
+        /* 그 외 페이지 선택 */
+        clock_pointer = list_next(clock_pointer);
+        lock_release(&frame_lock);
+        // printf("[CLOCK] choose victim: frame=%p, page=%p, va=%p\n", victim, page,
+        //        page ? page->va : NULL);
+        return victim;
+      }
+    }
+    /* 다음 프레임으로 넘어감(끝에 도달 시 다시 처음부터)*/
+    clock_pointer = list_next(clock_pointer);
+    if (clock_pointer == list_end(&frame_list)) {
+      clock_pointer = list_begin(&frame_list);
+    }
+  }
+  lock_release(&frame_lock);
+  return NULL;
 }
 
 /* Evict one page and return the corresponding frame.
  * Return NULL on error.*/
 static struct frame *vm_evict_frame(void) {
-  struct frame *victim UNUSED = vm_get_victim();
-  /* TODO: swap out the victim and return the evicted frame. */
+  /* 1. 희생할 프레임 선택 */
+  struct frame *victim = vm_get_victim();
+  ASSERT(victim != NULL);
+  ASSERT(victim->page != NULL);
+  struct page *page = victim->page;
+  /* 2. swap-out(anon -> swap 영역, file -> write-back) */
+  if (page != NULL) {
+    swap_out(page);
+  }
 
-  return NULL;
+  /* 3.프레임 비워서 새 페이지가 쓸 수 있도록 처리 */
+  victim->page = NULL;
+
+  return victim;
 }
 
 /* palloc() and get frame. If there is no available page, evict the page
@@ -141,18 +198,20 @@ static struct frame *vm_evict_frame(void) {
 /* 새로운 물리 프레임을 얻을 때 사용 */
 static struct frame *vm_get_frame(void) {
   struct frame *frame = NULL;
-  /* TODO: Fill this function. */
 
-  /* 물리주소 할당
-   * PAL_USER 는 메모리 풀(커널/유저) 중 유저풀
-   */
+  /* 물리주소 할당: PAL_USER 는 메모리 풀(커널/유저) 중 유저풀 */
   void *kva = palloc_get_page(PAL_USER);
   if (!kva) {
-    PANIC("todo:swap-out");
+    /* 메모리가 꽉 차서 할당 실패 시 스왑 아웃 */
+    vm_evict_frame();
+    kva = palloc_get_page(PAL_USER);
+    if (!kva) {
+      PANIC("swap-out 이후에도 메모리 할당 실패");
+    }
   }
   frame = malloc(sizeof(struct frame));
   if (!frame) {
-    PANIC("todo:?");
+    PANIC("프레임 malloc 할당 실패");
   }
   /* 프레임 초기화 */
   frame->kva = kva;
@@ -165,7 +224,6 @@ static struct frame *vm_get_frame(void) {
 
 void vm_free_frame(struct frame *frame) {
   if (frame == NULL) return;
-
   // TODO: 프레임 테이블 도입 시 락, 전역 자료구조, 핀 처리 구현
 
   // 페이지와의 양방향 연결을 끊기
@@ -173,7 +231,14 @@ void vm_free_frame(struct frame *frame) {
     if (frame->page->frame == frame) frame->page->frame = NULL;
     frame->page = NULL;
   }
+
+  //프레임 리스트에서 제거
+  lock_acquire(&frame_lock);
+  list_remove(&frame->elem);
+  lock_release(&frame_lock);
+
   // 실제 물리 페이지 반환
+  // printf("[FREE_PAGE] kva=%p pg_ofs=%#lx\n", frame->kva, pg_ofs(frame->kva));
   palloc_free_page(frame->kva);
   // 프레임 구조체 해제
   free(frame);
@@ -342,13 +407,23 @@ static bool vm_do_claim_page(struct page *page) {
   if (!frame) {
     return false;
   }
-
   /* Set links */
   frame->page = page;
   page->frame = frame;
+  /* 물리 페이지 테이블(PML4)에 맵핑 */
+  if (!pml4_set_page(thread_current()->pml4, page->va, frame->kva, page->writable)) {
+    // palloc_free_page(frame->kva);
+    // free(frame);
+    return false;
+  }
 
-  if (!pml4_set_page(thread_current()->pml4, page->va, frame->kva, page->writable)) return false;
-
+  /* PML4 세팅 성공 후 전역 프레임 리스트에 삽입 */
+  if (page_get_type(page) == VM_ANON || page_get_type(page) == VM_FILE) {
+    lock_acquire(&frame_lock);
+    list_push_back(&frame_list, &frame->elem);
+    lock_release(&frame_lock);
+  }
+  // printf("[ALLOC] claim_page: frame=%p, page=%p, va=%p\n", frame, page, page->va);
   return swap_in(page, frame->kva);  // 페이지 타입별 swap_in 구현이 실제 초기화 작업을 수행.
 }
 

@@ -78,10 +78,52 @@ bool anon_initializer(struct page *page, enum vm_type type, void *kva) {
 /* Swap in the page by read contents from the swap disk. */
 static bool anon_swap_in(struct page *page, void *kva) {
   struct anon_page *anon_page = &page->anon;
+  size_t slot_idx = anon_page->swap_slot;
+  if (slot_idx == -1) {
+    return false;  // 스왑된 적 없음
+  }
+
+  /* 1.디스크에서 페이지 데이터 읽어오기 */
+  for (int i = 0; i < sectors_per_page; i++) {
+    disk_read(swap_disk, slot_idx * sectors_per_page + i, kva + i * DISK_SECTOR_SIZE);
+  }
+
+  /* 2.스왑 테이블 해제 */
+  bitmap_set(swap_bitmap, slot_idx, false);
+
+  /* 3.슬롯번호 초기화 */
+  anon_page->swap_slot = -1;
 }
 
 /* Swap out the page by writing contents to the swap disk. */
-static bool anon_swap_out(struct page *page) { struct anon_page *anon_page = &page->anon; }
+static bool anon_swap_out(struct page *page) {
+  struct anon_page *anon_page = &page->anon;
+  struct frame *frame = page->frame;
+  struct thread *t = thread_current();
+  ASSERT(frame != NULL);
+  /* 1.빈 슬롯 검색 */
+  size_t slot_idx = bitmap_scan_and_flip(swap_bitmap, 0, 1, false);
+  if (slot_idx == BITMAP_ERROR) {
+    return false;  // swap 공간 부족
+  }
+  /* 2.디스크로 쓰기 */
+  for (int i = 0; i < sectors_per_page; i++) {
+    disk_write(swap_disk, slot_idx * sectors_per_page + i, frame->kva + i * DISK_SECTOR_SIZE);
+  }
+  /* 3.페이지 메타데이터 갱신 */
+  anon_page->swap_slot = slot_idx;
+
+  /* 4.페이지 테이블에서 매핑 해제 및 반환 */
+  if (page->frame != NULL) {
+    // pte 언매핑
+    if (pml4_get_page(t->pml4, page->va) != NULL) {
+      pml4_clear_page(t->pml4, page->va);
+    }
+    vm_free_frame(page->frame);
+    page->frame = NULL;
+  }
+  return true;
+}
 
 /* Destroy the anonymous page. PAGE will be freed by the caller. */
 static void anon_destroy(struct page *page) {
