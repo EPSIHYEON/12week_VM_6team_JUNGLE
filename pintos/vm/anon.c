@@ -89,10 +89,14 @@ static bool anon_swap_in(struct page *page, void *kva) {
   }
 
   /* 2.스왑 테이블 해제 */
+  lock_acquire(&swap_lock);
   bitmap_set(swap_bitmap, slot_idx, false);
+  lock_release(&swap_lock);
 
   /* 3.슬롯번호 초기화 */
   anon_page->swap_slot = -1;
+  // printf("[SWAP-IN] slot=%zu kva=%p page=%p va=%p\n", slot_idx, kva, page, page->va);
+  return true;
 }
 
 /* Swap out the page by writing contents to the swap disk. */
@@ -102,7 +106,10 @@ static bool anon_swap_out(struct page *page) {
   struct thread *t = thread_current();
   ASSERT(frame != NULL);
   /* 1.빈 슬롯 검색 */
+  lock_acquire(&swap_lock);
   size_t slot_idx = bitmap_scan_and_flip(swap_bitmap, 0, 1, false);
+  lock_release(&swap_lock);
+  
   if (slot_idx == BITMAP_ERROR) {
     return false;  // swap 공간 부족
   }
@@ -113,15 +120,13 @@ static bool anon_swap_out(struct page *page) {
   /* 3.페이지 메타데이터 갱신 */
   anon_page->swap_slot = slot_idx;
 
-  /* 4.페이지 테이블에서 매핑 해제 및 반환 */
-  if (page->frame != NULL) {
-    // pte 언매핑
-    if (pml4_get_page(t->pml4, page->va) != NULL) {
-      pml4_clear_page(t->pml4, page->va);
-    }
-    vm_free_frame(page->frame);
-    page->frame = NULL;
-  }
+  page->frame->page = NULL;
+  page->frame = NULL;
+
+  /* 4.페이지 테이블에서 매핑 해제 */
+  pml4_clear_page(t->pml4, page->va);
+
+  // printf("[SWAP-OUT] slot=%zu kva=%p page=%p va=%p\n", slot_idx, frame->kva, page, page->va);
   return true;
 }
 

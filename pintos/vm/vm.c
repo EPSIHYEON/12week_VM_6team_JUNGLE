@@ -136,7 +136,7 @@ static struct frame *vm_get_victim(void) {
   /* 전역변수 프레임 리스트에 대한 락 획득 */
   lock_acquire(&frame_lock);
   /* Clock 초기 위치 세팅 */
-  printf("\n[CLOCK] === start vm_get_victim ===\n");
+  // printf("\n[CLOCK] === start vm_get_victim ===\n");
   // printf("[CLOCK] frame_list size=%zu\n", list_size(&frame_list));
 
   if (clock_pointer == NULL || clock_pointer == list_end(&frame_list)) {
@@ -181,13 +181,7 @@ static struct frame *vm_evict_frame(void) {
   ASSERT(victim->page != NULL);
   struct page *page = victim->page;
   /* 2. swap-out(anon -> swap 영역, file -> write-back) */
-  if (page != NULL) {
-    swap_out(page);
-  }
-
-  /* 3.프레임 비워서 새 페이지가 쓸 수 있도록 처리 */
-  victim->page = NULL;
-
+  swap_out(page);
   return victim;
 }
 
@@ -197,25 +191,25 @@ static struct frame *vm_evict_frame(void) {
  * space.*/
 /* 새로운 물리 프레임을 얻을 때 사용 */
 static struct frame *vm_get_frame(void) {
-  struct frame *frame = NULL;
-
-  /* 물리주소 할당: PAL_USER 는 메모리 풀(커널/유저) 중 유저풀 */
+  struct frame *frame;
   void *kva = palloc_get_page(PAL_USER);
+  /* 할당 실패 시 기존 프레임 재활용 */
   if (!kva) {
-    /* 메모리가 꽉 차서 할당 실패 시 스왑 아웃 */
-    vm_evict_frame();
-    kva = palloc_get_page(PAL_USER);
-    if (!kva) {
-      PANIC("swap-out 이후에도 메모리 할당 실패");
-    }
+    frame = vm_evict_frame();
+    /* 프레임 초기화 */
+    frame->page = NULL;
+    return frame;
   }
+
+  /* 새로 할당되는 경우 */
   frame = malloc(sizeof(struct frame));
-  if (!frame) {
-    PANIC("프레임 malloc 할당 실패");
-  }
   /* 프레임 초기화 */
   frame->kva = kva;
   frame->page = NULL;
+  /* 프레임 리스트에 추가 */
+  lock_acquire(&frame_lock);
+  list_push_back(&frame_list, &frame->elem);
+  lock_release(&frame_lock);
 
   ASSERT(frame != NULL);
   ASSERT(frame->page == NULL);
@@ -417,12 +411,6 @@ static bool vm_do_claim_page(struct page *page) {
     return false;
   }
 
-  /* PML4 세팅 성공 후 전역 프레임 리스트에 삽입 */
-  if (page_get_type(page) == VM_ANON || page_get_type(page) == VM_FILE) {
-    lock_acquire(&frame_lock);
-    list_push_back(&frame_list, &frame->elem);
-    lock_release(&frame_lock);
-  }
   // printf("[ALLOC] claim_page: frame=%p, page=%p, va=%p\n", frame, page, page->va);
   return swap_in(page, frame->kva);  // 페이지 타입별 swap_in 구현이 실제 초기화 작업을 수행.
 }
