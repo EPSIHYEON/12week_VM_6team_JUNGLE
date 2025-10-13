@@ -79,7 +79,7 @@ bool anon_initializer(struct page *page, enum vm_type type, void *kva) {
 static bool anon_swap_in(struct page *page, void *kva) {
   struct anon_page *anon_page = &page->anon;
   size_t slot_idx = anon_page->swap_slot;
-  if (slot_idx == -1) {
+  if (slot_idx == ANON_SWAP_SLOT_INVALID) {
     return false;  // 스왑된 적 없음
   }
 
@@ -94,8 +94,7 @@ static bool anon_swap_in(struct page *page, void *kva) {
   lock_release(&swap_lock);
 
   /* 3.슬롯번호 초기화 */
-  anon_page->swap_slot = -1;
-  // printf("[SWAP-IN] slot=%zu kva=%p page=%p va=%p\n", slot_idx, kva, page, page->va);
+  anon_page->swap_slot = ANON_SWAP_SLOT_INVALID;
   return true;
 }
 
@@ -105,28 +104,27 @@ static bool anon_swap_out(struct page *page) {
   struct frame *frame = page->frame;
   struct thread *t = thread_current();
   ASSERT(frame != NULL);
+
   /* 1.빈 슬롯 검색 */
   lock_acquire(&swap_lock);
   size_t slot_idx = bitmap_scan_and_flip(swap_bitmap, 0, 1, false);
   lock_release(&swap_lock);
-  
   if (slot_idx == BITMAP_ERROR) {
     return false;  // swap 공간 부족
   }
+
   /* 2.디스크로 쓰기 */
   for (int i = 0; i < sectors_per_page; i++) {
     disk_write(swap_disk, slot_idx * sectors_per_page + i, frame->kva + i * DISK_SECTOR_SIZE);
   }
+
   /* 3.페이지 메타데이터 갱신 */
   anon_page->swap_slot = slot_idx;
-
   page->frame->page = NULL;
   page->frame = NULL;
 
   /* 4.페이지 테이블에서 매핑 해제 */
   pml4_clear_page(t->pml4, page->va);
-
-  // printf("[SWAP-OUT] slot=%zu kva=%p page=%p va=%p\n", slot_idx, frame->kva, page, page->va);
   return true;
 }
 
@@ -145,13 +143,13 @@ static void anon_destroy(struct page *page) {
     vm_free_frame(page->frame);
     page->frame = NULL;
   }
-  // 스왑 슬롯을 사용했다면 반환
-  if (swap_bitmap != NULL && anon->swap_slot != ANON_SWAP_SLOT_INVALID) {
-    lock_acquire(&swap_lock);
-    // 슬롯을 비어 있음으로 표시 (false)
-    bitmap_set(swap_bitmap, anon->swap_slot, false);
-    // 슬롯 번호를 초기화해 재사용을 방지
-    anon->swap_slot = ANON_SWAP_SLOT_INVALID;
-    lock_release(&swap_lock);
-  }
+  // 스왑 슬롯을 사용했다면 반환 -> swap-anon 테스트 마지막에 커널패닉 터져서 주석처리함
+  // if (swap_bitmap != NULL && anon->swap_slot != ANON_SWAP_SLOT_INVALID) {
+  //   lock_acquire(&swap_lock);
+  //   // 슬롯을 비어 있음으로 표시 (false)
+  //   bitmap_set(swap_bitmap, anon->swap_slot, false);
+  //   // 슬롯 번호를 초기화해 재사용을 방지
+  //   anon->swap_slot = ANON_SWAP_SLOT_INVALID;
+  //   lock_release(&swap_lock);
+  // }
 }

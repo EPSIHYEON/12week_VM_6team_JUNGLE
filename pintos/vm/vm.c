@@ -147,6 +147,15 @@ static struct frame *vm_get_victim(void) {
     struct frame *victim = list_entry(clock_pointer, struct frame, elem);
     struct page *page = victim->page;
     struct thread *curr = thread_current();
+
+    // 유저스택영역은 제외
+    // if (page_get_type(page) & VM_MARKER_0) continue;  // or skip adding to frame_list
+    // if (page->va >= USER_STACK - PGSIZE && page->va < USER_STACK) {
+    //   clock_pointer = list_next(clock_pointer);
+    //   if (clock_pointer == list_end(&frame_list)) clock_pointer = list_begin(&frame_list);
+    //   continue;
+    // }
+
     /* 접근여부 검사 */
     if (page != NULL) {
       if (pml4_is_accessed(curr->pml4, page->va)) {
@@ -401,18 +410,16 @@ static bool vm_do_claim_page(struct page *page) {
   if (!frame) {
     return false;
   }
-  /* Set links */
+  /* page <-> frame 연결 */
   frame->page = page;
   page->frame = frame;
-  /* 물리 페이지 테이블(PML4)에 맵핑 */
-  if (!pml4_set_page(thread_current()->pml4, page->va, frame->kva, page->writable)) {
-    // palloc_free_page(frame->kva);
-    // free(frame);
-    return false;
-  }
 
-  // printf("[ALLOC] claim_page: frame=%p, page=%p, va=%p\n", frame, page, page->va);
-  return swap_in(page, frame->kva);  // 페이지 타입별 swap_in 구현이 실제 초기화 작업을 수행.
+  /* swap_in()을 먼저 호출해서 실제 데이터를 frame->kva에 복구 */
+  if (!swap_in(page, frame->kva)) return false;
+
+  /* 물리 페이지 테이블(PML4)에 맵핑 */
+  if (!pml4_set_page(thread_current()->pml4, page->va, frame->kva, page->writable)) return false;
+  return true;
 }
 
 /* Initialize new supplemental page table */
