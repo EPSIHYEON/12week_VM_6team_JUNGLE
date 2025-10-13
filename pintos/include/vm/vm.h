@@ -51,6 +51,7 @@ struct aux {
   off_t ofs;
   uint32_t read_bytes;
   uint32_t zero_bytes;
+  struct mmap_mapping *mapping;
 };
 
 /* The representation of "page".

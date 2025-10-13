@@ -6,6 +6,9 @@
 #include "threads/malloc.h"
 #include "vm/inspect.h"
 #include <string.h>
+#ifdef USERPROG
+#include "userprog/syscall.h"
+#endif
 
 #define STACK_MAX_BYTES (1 << 20) /* 1 MB stack limit. 스택 하한: USER_STACK - 1MB */
 #define STACK_HEURISTIC 32 /* RSP 근처 허용 거리(바이트). 너무 작으면 pusha류 테스트 실패 */
@@ -374,22 +377,38 @@ bool supplemental_page_table_copy(struct supplemental_page_table *dst,
     bool writable = parent_page->writable;
 
     switch (type) {
-      case VM_UNINIT:
+      case VM_UNINIT: {
         /* UNINIT 페이지: 아직 물리 메모리에 로드되지 않은 페이지
          * 부모의 초기화 정보를 그대로 자식에게 물려줌 */
         struct uninit_page *uninit = &parent_page->uninit;
         // 부모 aux 복사
-        void *parent_aux = uninit->aux;
-        void *child_aux = NULL;
+        struct aux *parent_aux = uninit->aux;
+        struct aux *child_aux = NULL;
         if (parent_aux != NULL) {
-          // aux가 어떤 구조체인지에 따라 크기를 알아야 함
-          size_t aux_size = sizeof(struct aux);  // 이걸 알아야 deep copy 가능
-          child_aux = malloc(aux_size);
-          memcpy(child_aux, parent_aux, aux_size);
+          child_aux = malloc(sizeof(struct aux));
+          if (child_aux == NULL) return false;
+          *child_aux = *parent_aux;
+          child_aux->mapping = NULL;
+          if (VM_TYPE(uninit->type) == VM_FILE && parent_aux->file != NULL) {
+#ifdef USERPROG
+            lock_acquire(&filesys_lock);
+#endif
+            child_aux->file = file_reopen(parent_aux->file);
+#ifdef USERPROG
+            lock_release(&filesys_lock);
+#endif
+            if (child_aux->file == NULL) {
+              free(child_aux);
+              return false;
+            }
+          }
         }
-        if (!vm_alloc_page_with_initializer(real_type, upage, writable, uninit->init, child_aux))
+        if (!vm_alloc_page_with_initializer(real_type, upage, writable, uninit->init, child_aux)) {
+          if (child_aux != NULL) free(child_aux);
           return false;
+        }
         break;
+      }
 
       case VM_ANON:
       case VM_FILE:

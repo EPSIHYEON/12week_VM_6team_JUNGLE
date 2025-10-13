@@ -746,19 +746,35 @@ static bool lazy_load_segment(struct page *page, void *aux) {
   /* TODO: This called when the first page fault occurs on address VA. */
   /* TODO: VA is available when calling this function. */
 
+  // mmap_lazy_load와 같은 방식으로 aux 처리
   struct aux *aux_data = (struct aux *)aux;
-  struct file *file = aux_data->file;
-  off_t ofs = aux_data->ofs;
-  size_t page_read_bytes = aux_data->read_bytes;
-  size_t page_zero_bytes = aux_data->zero_bytes;
+  if (aux_data == NULL) return false;
+
+  struct file_page *file_page = &page->file;
+  file_page->file = aux_data->file;
+  file_page->ofs = aux_data->ofs;
+  file_page->read_bytes = aux_data->read_bytes;
+  file_page->zero_bytes = aux_data->zero_bytes;
+  file_page->mapping = NULL;
+
+  struct file *file = file_page->file;
+  off_t ofs = file_page->ofs;
+  size_t page_read_bytes = file_page->read_bytes;
+  size_t page_zero_bytes = file_page->zero_bytes;
+  if (file == NULL) {
+    free(aux_data);
+    return false;
+  }
   uint8_t *kpage = page->frame->kva;
 
   if (file_read_at(file, kpage, page_read_bytes, ofs) != (int)page_read_bytes) {
+    free(aux_data);
     return false;
   }
   //나머지 공간은 0으로 채움
   memset(kpage + page_read_bytes, 0, page_zero_bytes);
 
+  free(aux_data);
   return true;
 }
 
@@ -801,6 +817,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
     aux->ofs = ofs;
     aux->read_bytes = page_read_bytes;
     aux->zero_bytes = page_zero_bytes;
+    aux->mapping = NULL;
 
     if (!vm_alloc_page_with_initializer(VM_FILE,
                                         upage,  //원래는 VM_ANON 주의!!!!!!!!!
