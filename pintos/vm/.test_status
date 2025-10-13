@@ -44,7 +44,7 @@ page-merge-seq PASS
 pt-bad-read PASS
 priority-condvar PASS
 priority-donate-nest PASS
-page-merge-par FAIL
+page-merge-par PASS
 rox-child PASS
 mmap-write FAIL
 alarm-single PASS

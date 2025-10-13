@@ -460,6 +460,7 @@ static bool load(const char *file_name,
 
   /* Open executable file. */  //파일을 염(비어있는지만 확인)
   file = filesys_open(program_command);
+
   if (file == NULL) {
     printf("load: %s: open failed\n", program_command);
     goto done;
@@ -528,7 +529,6 @@ static bool load(const char *file_name,
 
   /* Set up stack. */  //스택 할당(빈 공간)
   if (!setup_stack(if_)) goto done;
-
   /* Start address. */  //시작 위치 지정
   if_->rip = ehdr.e_entry;
 

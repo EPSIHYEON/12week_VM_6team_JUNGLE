@@ -146,9 +146,9 @@ int write(int fd, const void *buffer, unsigned size) {
     if (target_file == NULL) {
       return -1;
     }
-
+    lock_acquire(&filesys_lock);
     int bytes_written = file_write(target_file, buffer, size);
-
+    lock_release(&filesys_lock);
     return bytes_written;
   }
 }

@@ -98,7 +98,6 @@ bool vm_alloc_page_with_initializer(enum vm_type type, void *upage, bool writabl
       free(page);
       return false;
     }
-
     return true;
   }
   return false;
@@ -121,15 +120,20 @@ struct page *spt_find_page(struct supplemental_page_table *spt, void *va UNUSED)
 /* Insert PAGE into spt with validation. */
 bool spt_insert_page(struct supplemental_page_table *spt, struct page *page) {
   int succ = false;
+  // lock_acquire(&filesys_lock);
   /* TODO: Fill this function. */
   if (hash_insert(&spt->h, &page->h_elem) == NULL) {
     succ = true;
   }
+
+  // lock_release(&filesys_lock);
   return succ;
 }
 
 void spt_remove_page(struct supplemental_page_table *spt UNUSED, struct page *page) {
+  lock_acquire(&filesys_lock);
   vm_dealloc_page(page);
+  lock_release(&filesys_lock);
 }
 
 /* 페이지 교체 알고리즘 : Clock 알고리즘
@@ -463,13 +467,9 @@ bool supplemental_page_table_copy(struct supplemental_page_table *dst,
           *child_aux = *parent_aux;
           child_aux->mapping = NULL;
           if (VM_TYPE(uninit->type) == VM_FILE && parent_aux->file != NULL) {
-#ifdef USERPROG
             lock_acquire(&filesys_lock);
-#endif
             child_aux->file = file_reopen(parent_aux->file);
-#ifdef USERPROG
             lock_release(&filesys_lock);
-#endif
             if (child_aux->file == NULL) {
               free(child_aux);
               return false;
