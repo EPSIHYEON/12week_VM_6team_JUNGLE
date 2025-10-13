@@ -75,6 +75,7 @@ static bool file_backed_swap_out(struct page *page) {
       // lock_release(&filesys_lock);
       return false;
     }  // 제대로 썼는지 확인
+    pml4_set_dirty(thread_current()->pml4, page->va, false);
   }
 
   // lock_release(&filesys_lock);
@@ -98,6 +99,7 @@ static void file_backed_destroy(struct page *page) {
     off_t written =
         file_write_at(file_page->file, page->frame->kva, file_page->read_bytes, file_page->ofs);
     ASSERT(written == file_page->read_bytes);
+    pml4_set_dirty(thread_current()->pml4, page->va, false);
   }  // dirty 하다면 파일 쓰기
 
   lock_release(&filesys_lock);
