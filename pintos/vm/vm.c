@@ -76,6 +76,9 @@ bool vm_alloc_page_with_initializer(enum vm_type type, void *upage, bool writabl
 
     // VM_ANON/VM_FILE 같은 원시 타입에 VM_MARKER_0 등 플래그를 제거하고 순수한 타입만 추출
     enum vm_type primitive_type = VM_TYPE(type);
+    // 로그 
+    // printf("[VM_ALLOC] VA: %p, Type: %s\n", upage, (primitive_type == VM_ANON ? "ANON" : "FILE"));
+
     if (primitive_type == VM_ANON) {
       uninit_new(page, upage, init, type, aux, anon_initializer);
     } else if (primitive_type == VM_FILE) {

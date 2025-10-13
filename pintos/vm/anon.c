@@ -144,12 +144,12 @@ static void anon_destroy(struct page *page) {
     page->frame = NULL;
   }
   // 스왑 슬롯을 사용했다면 반환 -> swap-anon 테스트 마지막에 커널패닉 터져서 주석처리함
-  // if (swap_bitmap != NULL && anon->swap_slot != ANON_SWAP_SLOT_INVALID) {
-  //   lock_acquire(&swap_lock);
-  //   // 슬롯을 비어 있음으로 표시 (false)
-  //   bitmap_set(swap_bitmap, anon->swap_slot, false);
-  //   // 슬롯 번호를 초기화해 재사용을 방지
-  //   anon->swap_slot = ANON_SWAP_SLOT_INVALID;
-  //   lock_release(&swap_lock);
-  // }
+  if (swap_bitmap != NULL && anon->swap_slot != ANON_SWAP_SLOT_INVALID) {
+    lock_acquire(&swap_lock);
+    // 슬롯을 비어 있음으로 표시 (false)
+    bitmap_set(swap_bitmap, anon->swap_slot, false);
+    // 슬롯 번호를 초기화해 재사용을 방지
+    anon->swap_slot = ANON_SWAP_SLOT_INVALID;
+    lock_release(&swap_lock);
+  }
 }

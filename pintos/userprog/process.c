@@ -793,6 +793,8 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
 
     /* TODO: Set up aux to pass information to the lazy_load_segment. */
     // void *aux = NULL;
+    enum vm_type type = (page_read_bytes == 0) ? VM_ANON : VM_FILE;
+
     struct aux *aux = malloc(sizeof(struct aux));
     if (aux == NULL) {
       return false;
@@ -802,9 +804,7 @@ static bool load_segment(struct file *file, off_t ofs, uint8_t *upage, uint32_t 
     aux->read_bytes = page_read_bytes;
     aux->zero_bytes = page_zero_bytes;
 
-    if (!vm_alloc_page_with_initializer(VM_ANON,
-                                        upage,  //원래는 VM_ANON 주의!!!!!!!!!
-                                        writable, lazy_load_segment, aux)) {
+    if (!vm_alloc_page_with_initializer(type, upage, writable, lazy_load_segment, aux)) {
       free(aux);
       return false;
     }
