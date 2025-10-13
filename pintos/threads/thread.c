@@ -436,6 +436,9 @@ static void init_thread(struct thread *t, const char *name, int priority) {
   t->user_rsp = NULL;
 
 #endif
+#ifdef VM
+  list_init(&t->mmap_list);
+#endif
 
   t->status = THREAD_BLOCKED;
   strlcpy(t->name, name, sizeof t->name);
