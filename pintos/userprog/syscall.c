@@ -11,9 +11,11 @@
 #include "include/filesys/file.h"
 #include "include/userprog/process.h"
 #include "intrinsic.h"
+#include "threads/vaddr.h"
 #include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include <round.h>
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -24,6 +26,10 @@ static bool sys_create(const char *file, unsigned initial_size);
 unsigned tell(int fd);
 bool sys_remove(const char *file);
 struct lock filesys_lock;
+#ifdef VM
+static void *sys_mmap(void *addr, size_t length, int writable, int fd, off_t offset);
+static void sys_munmap(void *addr);
+#endif
 
 /* System call.
  *
@@ -104,6 +110,15 @@ void syscall_handler(struct intr_frame *f UNUSED) {
     case SYS_CLOSE:
       close((int)f->R.rdi);
       break;
+#ifdef VM
+    case SYS_MMAP:
+      f->R.rax = (uint64_t)sys_mmap((void *)f->R.rdi, (size_t)f->R.rsi, (int)f->R.rdx,
+                                    (int)f->R.r10, (off_t)f->R.r8);
+      break;
+    case SYS_MUNMAP:
+      sys_munmap((void *)f->R.rdi);
+      break;
+#endif
     default:
       printf("Unknown syscall: %d\n", (int)f->R.rax);
       break;
@@ -131,9 +146,9 @@ int write(int fd, const void *buffer, unsigned size) {
     if (target_file == NULL) {
       return -1;
     }
-
+    lock_acquire(&filesys_lock);
     int bytes_written = file_write(target_file, buffer, size);
-
+    lock_release(&filesys_lock);
     return bytes_written;
   }
 }
@@ -143,9 +158,15 @@ int exec(void *f_name) {
     return -1;
   }
   void *ptr = pg_round_down(f_name);  //페이지의 초깃값
+#ifdef VM
   if (spt_find_page(&thread_current()->spt, ptr) == NULL) {
     exit(-1);
   }
+#else
+  if (pml4_get_page(thread_current()->pml4, ptr) == NULL) {
+    exit(-1);
+  }
+#endif
 
   char file_name[128];
   memcpy(file_name, f_name, sizeof(file_name));
@@ -172,9 +193,9 @@ static bool sys_create(const char *file, unsigned initial_size) {
   if (strlen(file) == 0 || strlen(file) > NAME_MAX) {  //== 0 equals to "" 빈문자열
     return false;
   }
-
+  lock_acquire(&filesys_lock);
   bool success = filesys_create(file, initial_size);
-
+  lock_release(&filesys_lock);
   return success;
 }
 
@@ -393,3 +414,137 @@ unsigned tell(int fd) {
 
   return file_tell_return;
 }
+
+#ifdef VM
+/**
+ * 유저가 요청한 파일 구간을 주어진 가상주소에 메모리 매핑하도록 모든 커널 측 사전 검증을 수행
+ * 실제 매핑 작업은 do_mmap에게 위임하고 결과를 반환
+ *
+ * addr : 매핑을 시작한 유저 가상 주소
+ * length : 매핑할 바이트 수. 실제 매핑 페이지 수는 DIV_ROUND_UP(length, PGSIZE)
+ * writable_flag : 매핑을 쓰기 가능하게 만들지 여부
+ * fd : 매핑할 열린 파일의 FD
+ * offest : 파일 내 시작 오프셋
+ */
+static void *sys_mmap(void *addr, size_t length, int writable_flag, int fd, off_t offset) {
+  // 1. 기본 인자들과 주소 검증
+  if (addr == NULL || addr == 0) return NULL;
+  if (!is_user_vaddr(addr)) return NULL;
+  if (pg_ofs(addr) != 0) return NULL;
+  if (length == 0) return NULL;
+  // FD는 일반 파일만(0/1 제외)
+  if (fd < 2 || fd >= FDT_SIZE) return NULL;
+  // 오프셋은 음수 금지, 페이지 정렬
+  if (offset < 0 || offset % PGSIZE != 0) return NULL;
+
+  // 2. FD -> 파일 객체 얻기
+  // 현재 스레드의 FDT에서 파일 포인터를 가져오고, 없으면 실패
+  struct thread *curr = thread_current();
+  struct file *file = curr->fdt[fd];
+  // 매핑(mmap) 불가를 의미함
+  if (file == NULL) return NULL;
+
+  // 파일 재오픈용 임시 포인터
+  // mmap에서 파일을 매핑할 때는, 같은 파일을 여러 mmap에서 공유하더라도 각각 자기만의 file 매핑을
+  // 알아야 함
+  // -> 각각의 매핑이 I/O를 동시에 수행할 수 있어야 하기 때문. 만약 사용자가 close 해버리더라도
+  // 매핑이 유효해야함 따라서 mmap은 기존 열린 파일 핸들(file)을 복사(file_reopen(file))해서 사용
+  struct file *reopened = NULL;
+  // 읽은 전체 파일의 크기를 저장할 변수
+  off_t file_len = 0;
+
+  // 3. 파일 성질/길이/재오픈
+  // 파일 시스템 전역 락 획득. file은 공유 자원임
+  lock_acquire(&filesys_lock);
+  // 파일이 디렉토리일 경우에도 실패
+  if (file_is_dir(file)) {
+    lock_release(&filesys_lock);
+    return NULL;
+  }
+  // 매핑할 내용이 없을 경우 실패처리
+  file_len = file_length(file);
+  if (file_len <= 0) {
+    lock_release(&filesys_lock);
+    return NULL;
+  }
+  // 같은 파일을 새로 오픈한 복제 핸들을 생성
+  reopened = file_reopen(file);
+  lock_release(&filesys_lock);
+
+  if (reopened == NULL) return NULL;
+  // 매핑할 오프셋이 파일 길이 이상이다 -> 매핑을 파일 끝 너머에서 시작하려는 것. 실패 처리
+  if ((off_t)offset >= file_len) {
+    file_close(reopened);
+    return NULL;
+  }
+
+  // 4. 매핑 범위 계산/오버플로/유저영역 체크
+  // length 바이트를 페이지 단위로 올림
+  size_t page_cnt = DIV_ROUND_UP(length, PGSIZE);
+  // 매핑의 시작, 끝 주소 계산
+  uintptr_t start = (uintptr_t)addr;
+  uintptr_t end = start + page_cnt * (uintptr_t)PGSIZE;
+  // 오버플로우되어 end가 start보다 작아지면 실패
+  if (end < start) {
+    file_close(reopened);
+    return NULL;
+  }
+  // 페이지의 갯수가 올바른지
+  if (page_cnt > 0) {
+    // 마지막 주소를 통해 매핑 구간이 유저영역인지를 검증
+    void *last_byte = (void *)(end - 1);
+    if (!is_user_vaddr(last_byte)) {
+      file_close(reopened);
+      return NULL;
+    }
+  }
+
+  // 5. 겹침 금지(SPT 충돌로 검사)
+  struct supplemental_page_table *spt = &curr->spt;
+  // 페이지 단위로 순회
+  for (size_t i = 0; i < page_cnt; i++) {
+    void *upage = (void *)(start + i * PGSIZE);
+    // 페이지가 유저 영역인지 검증
+    if (!is_user_vaddr(upage)) {
+      file_close(reopened);
+      return NULL;
+    }
+    // 이미 등록된 페이지라는 뜻은 이 주소에 다른 데이터가 매핑되어있으므로 mmap이 불가능함
+    if (spt_find_page(spt, upage) != NULL) {
+      file_close(reopened);
+      return NULL;
+    }
+  }
+
+  // 6. 실제 매핑을 수행하고 결과를 반환
+  void *result = do_mmap(addr, length, writable_flag != 0, reopened, offset);
+  if (result == NULL) {
+    file_close(reopened);
+    return NULL;
+  }
+  return result;
+}
+
+static void sys_munmap(void *addr) {
+  if (addr == NULL || addr == 0) exit(-1);
+  if (pg_ofs(addr) != 0) exit(-1);
+  if (!is_user_vaddr(addr)) exit(-1);
+
+  struct thread *curr = thread_current();
+  struct mmap_mapping *target = NULL;
+
+  // 매핑 리스트 순회하며 타겟 객체 찾기
+  for (struct list_elem *e = list_begin(&curr->mmap_list); e != list_end(&curr->mmap_list);
+       e = list_next(e)) {
+    struct mmap_mapping *mapping = list_entry(e, struct mmap_mapping, elem);
+    if (mapping->start == addr) {
+      target = mapping;
+      break;
+    }
+  }
+  // 못찾았을 경우 실패 처리
+  if (target == NULL) exit(-1);
+
+  do_munmap(addr);
+}
+#endif
