@@ -639,20 +639,20 @@ static bool load(const char *file_name,
    * TODO: Implement argument passing (see project2/argument_passing.html). */
 
   // parsing
-  char *args[64];
+  char *args[32];
   args[0] = program_command;
   char *target;
   int num = 1;
 
   while ((target = strtok_r(NULL, " ", &str_point)) != NULL) {
-    if (num >= 64) {  // args 배열이 꽉 찼으면 더 이상 받지 않음
+    if (num >= 32) {  // args 배열이 꽉 찼으면 더 이상 받지 않음
       break;
     }
     args[num] = target;
     num++;
   }
   const int argc = num;
-  char *args_address[64];
+  char *args_address[32];
 
   // put into stack
   //실제 값을 스택에 채워넣는 과정
