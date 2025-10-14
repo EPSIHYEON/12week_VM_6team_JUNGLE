@@ -146,9 +146,9 @@ int write(int fd, const void *buffer, unsigned size) {
     if (target_file == NULL) {
       return -1;
     }
-
+    lock_acquire(&filesys_lock);
     int bytes_written = file_write(target_file, buffer, size);
-
+    lock_release(&filesys_lock);
     return bytes_written;
   }
 }
@@ -193,9 +193,9 @@ static bool sys_create(const char *file, unsigned initial_size) {
   if (strlen(file) == 0 || strlen(file) > NAME_MAX) {  //== 0 equals to "" 빈문자열
     return false;
   }
-
+  lock_acquire(&filesys_lock);
   bool success = filesys_create(file, initial_size);
-
+  lock_release(&filesys_lock);
   return success;
 }
 
