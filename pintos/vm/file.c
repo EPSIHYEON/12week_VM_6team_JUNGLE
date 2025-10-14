@@ -7,11 +7,10 @@
 #include "threads/malloc.h"
 #include "userprog/syscall.h"
 #include "vm/vm.h"
-#include "include/userprog/syscall.h"
 static bool file_backed_swap_in(struct page *page, void *kva);
 static bool file_backed_swap_out(struct page *page);
 static void file_backed_destroy(struct page *page);
-static bool mmap_lazy_load(struct page *page, void *aux_);
+bool mmap_lazy_load(struct page *page, void *aux_);
 
 /* DO NOT MODIFY this struct */
 static const struct page_operations file_ops = {
@@ -28,13 +27,17 @@ void vm_file_init(void) {}
 bool file_backed_initializer(struct page *page, enum vm_type type, void *kva) {
   /* Set up the handler */
   page->operations = &file_ops;
-  struct aux *aux = page->uninit.aux;
   struct file_page *file_page = &page->file;
 
-  file_page->file = aux->file;
-  file_page->ofs = aux->ofs;
-  file_page->zero_bytes = aux->zero_bytes;
-  file_page->read_bytes = aux->read_bytes;
+  // init에서는 기본 값으로 초기화
+  file_page->file = NULL;
+  file_page->ofs = 0;
+  file_page->read_bytes = 0;
+  file_page->zero_bytes = PGSIZE;
+  file_page->mapping = NULL;
+
+  (void)type;
+  (void)kva;
 
   return true;
 }
@@ -64,26 +67,27 @@ static bool file_backed_swap_in(struct page *page, void *kva) {
 // page->frame->kva : 커널이 실제 데이터를 접근하는 물리 주소 ex. palloc_get_page()
 static bool file_backed_swap_out(struct page *page) {
   struct file_page *file_page = &page->file;
-  if (page->frame == NULL) return false;  // 물리 메모리 없으면 넘어감
+  if (page->frame == NULL) return true;
 
-  // lock_acquire(&filesys_lock);
+  struct mmap_mapping *mapping = file_page->mapping;
+  struct thread *owner = mapping != NULL ? mapping->owner : thread_current();
+  if (owner == NULL) owner = thread_current();
 
-  if (pml4_is_dirty(thread_current()->pml4, page->va)) {  // 수정된 사항이 있으면
-    off_t bytes_written = file_write_at(file_page->file, page->frame->kva, file_page->read_bytes,
-                                        file_page->ofs);  //다시 쓰고
-    if (bytes_written != file_page->read_bytes) {
-      // lock_release(&filesys_lock);
-      return false;
-    }  // 제대로 썼는지 확인
+  bool dirty = false;
+  if (owner->pml4 != NULL) dirty = pml4_is_dirty(owner->pml4, page->va);
+  // 파일 전역 락 추가
+  if (dirty && file_page->file != NULL && file_page->read_bytes > 0) {
+    lock_acquire(&filesys_lock);
+    off_t written =
+        file_write_at(file_page->file, page->frame->kva, file_page->read_bytes, file_page->ofs);
+    lock_release(&filesys_lock);
+    if (written != (off_t)file_page->read_bytes) return false;
+    pml4_set_dirty(owner->pml4, page->va, false);
   }
 
-  // lock_release(&filesys_lock);
-  pml4_clear_page(thread_current()->pml4, page->va);  //물리 메모리 매핑 끊음
+  if (owner->pml4 != NULL && pml4_get_page(owner->pml4, page->va) != NULL)
+    pml4_clear_page(owner->pml4, page->va);
 
-  // page->status = IN_FILE;  // status 변화함
-
-  // vm_free_frame(page->frame);  // 프레임 해제
-  // page->frame = NULL;
   page->frame->page = NULL;
   page->frame = NULL;
 
@@ -93,16 +97,23 @@ static bool file_backed_swap_out(struct page *page) {
 /* Destory the file backed page. PAGE will be freed by the caller. */
 static void file_backed_destroy(struct page *page) {
   struct file_page *file_page = &page->file;
-  lock_acquire(&filesys_lock);
-  if (page->frame != NULL && pml4_is_dirty(thread_current()->pml4, page->va)) {
+  struct mmap_mapping *mapping = file_page->mapping;
+  // 매핑 객체의 소유 스레드에 대한 처리 추가
+  struct thread *owner = mapping != NULL ? mapping->owner : thread_current();
+  if (owner == NULL) owner = thread_current();
+  uint64_t *pml4 = owner != NULL ? owner->pml4 : thread_current()->pml4;
+  if (page->frame != NULL && file_page->file != NULL && file_page->read_bytes > 0 && pml4 != NULL &&
+      pml4_is_dirty(pml4, page->va)) {
+    lock_acquire(&filesys_lock);
     off_t written =
         file_write_at(file_page->file, page->frame->kva, file_page->read_bytes, file_page->ofs);
-    ASSERT(written == file_page->read_bytes);
-  }  // dirty 하다면 파일 쓰기
+    lock_release(&filesys_lock);
+    if (written == (off_t)file_page->read_bytes) {
+      pml4_set_dirty(pml4, page->va, false);
+    }
+  }
 
-  lock_release(&filesys_lock);
-
-  pml4_clear_page(thread_current()->pml4, page->va);  // 매핑 해제
+  if (pml4 != NULL && pml4_get_page(pml4, page->va) != NULL) pml4_clear_page(pml4, page->va);
 
   if (page->frame != NULL) {
     vm_free_frame(page->frame);
@@ -203,7 +214,7 @@ fail:
  * page : 지금 fault가 난 실제로 로딩될 페이지 객체
  * aux_ : vm_alloc_page_with_initializer()에서 넘겨준 추가 정보 구조체
  */
-static bool mmap_lazy_load(struct page *page, void *aux_) {
+bool mmap_lazy_load(struct page *page, void *aux_) {
   // aux 캐스팅 복원
   struct aux *aux = (struct aux *)aux_;
   if (aux == NULL) return false;
@@ -262,4 +273,77 @@ static bool mmap_lazy_load(struct page *page, void *aux_) {
 }
 
 /* Do the munmap */
-void do_munmap(void *addr) {}
+void do_munmap(void *addr) {
+  if (addr == NULL) return;
+
+  struct thread *curr = thread_current();
+  struct mmap_mapping *target = NULL;
+  // 현재 스레드의 mmap 목록에서 addr을 시작 주소로 갖는 매핑을 찾는다
+  for (struct list_elem *e = list_begin(&curr->mmap_list); e != list_end(&curr->mmap_list);
+       e = list_next(e)) {
+    struct mmap_mapping *mapping = list_entry(e, struct mmap_mapping, elem);
+    if (mapping->start == addr) {
+      target = mapping;
+      break;
+    }
+  }
+  if (target == NULL) return;
+
+  ASSERT(target->owner == curr);
+
+  size_t page_cnt = target->page_cnt;
+
+  for (size_t i = 0; i < page_cnt; i++) {
+    void *upage = (uint8_t *)target->start + i * PGSIZE;
+    struct page *page = spt_find_page(&curr->spt, upage);
+    // 해당 페이지가 이미 제거되었으면 건너뛴다
+    if (page == NULL) continue;
+
+    size_t write_bytes = 0;
+    off_t page_ofs = target->offset + (off_t)i * PGSIZE;
+
+    // UNINIT 상태면 aux에 저장된 read_bytes/offset을 활용
+    if (page->operations->type == VM_UNINIT) {
+      struct aux *aux = page->uninit.aux;
+      if (aux != NULL) {
+        write_bytes = aux->read_bytes;
+        page_ofs = aux->ofs;
+        aux->mapping = NULL;
+      }
+      // 이미 파일 페이지로 초기화된 경우 file_page 메타데이터 사용
+    } else if (page_get_type(page) == VM_FILE) {
+      struct file_page *file_page = &page->file;
+      write_bytes = file_page->read_bytes;
+      page_ofs = file_page->ofs;
+    }
+
+    void *mapped_kva = pml4_get_page(curr->pml4, upage);
+    void *frame_kva = page->frame != NULL ? page->frame->kva : mapped_kva;
+    bool is_dirty = mapped_kva != NULL && pml4_is_dirty(curr->pml4, upage);
+
+    // dirty 페이지이면 파일에 read_bytes 만큼만 write-back
+    if (is_dirty && write_bytes > 0 && target->file != NULL && frame_kva != NULL) {
+      lock_acquire(&filesys_lock);
+      off_t written = file_write_at(target->file, frame_kva, write_bytes, page_ofs);
+      lock_release(&filesys_lock);
+      ASSERT(written == (off_t)write_bytes);
+    }
+    if (is_dirty) pml4_set_dirty(curr->pml4, upage, false);
+
+    // PTE 매핑 제거 (프레임이 있다면 이후 spt_remove에서 해제)
+    if (mapped_kva != NULL) pml4_clear_page(curr->pml4, upage);
+
+    // SPT에서 페이지 제거 -> destroy 경로 통해 프레임/aux 정리
+    spt_remove_page(&curr->spt, page);
+  }
+
+  // 매핑 리스트에서 노드를 제거하고 파일 핸들 닫기
+  list_remove(&target->elem);
+  lock_acquire(&filesys_lock);
+  file_close(target->file);
+  lock_release(&filesys_lock);
+  target->file = NULL;
+  target->owner = NULL;
+  // 매핑 메타데이터 해제
+  free(target);
+}

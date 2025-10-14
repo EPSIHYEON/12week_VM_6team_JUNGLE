@@ -111,10 +111,8 @@ struct page *spt_find_page(struct supplemental_page_table *spt, void *va UNUSED)
 
   struct hash_elem *e = hash_find(&spt->h, &page.h_elem);
   if (e != NULL) {
-    struct page *page = hash_entry(e, struct page, h_elem);
-    return page;
+    return hash_entry(e, struct page, h_elem);
   }
-
   return NULL;
 }
 
@@ -128,7 +126,9 @@ bool spt_insert_page(struct supplemental_page_table *spt, struct page *page) {
   return succ;
 }
 
-void spt_remove_page(struct supplemental_page_table *spt UNUSED, struct page *page) {
+void spt_remove_page(struct supplemental_page_table *spt, struct page *page) {
+  if (spt == NULL || page == NULL) return;
+  hash_delete(&spt->h, &page->h_elem);
   vm_dealloc_page(page);
 }
 
@@ -348,7 +348,6 @@ bool vm_try_handle_fault(struct intr_frame *f, void *addr, bool user, bool write
   if (addr == NULL) return false;
   if (user && is_kernel_vaddr(addr)) return false;
   if (!is_user_vaddr(addr)) return false;
-  if ((uint8_t *)addr >= (uint8_t *)USER_STACK) return false;
 
   void *fault_page = pg_round_down(addr);
   struct page *page = NULL;
@@ -484,28 +483,72 @@ bool supplemental_page_table_copy(struct supplemental_page_table *dst,
       }
 
       case VM_ANON:
-      case VM_FILE:
-        /* ANON 또는 FILE 페이지: 이미 물리 메모리에 내용이 로드된 페이지
-           독자적인 물리 공간을 가져야 함
-        */
-        if (!vm_alloc_page_with_initializer(VM_ANON, upage, writable, NULL, NULL)) {
-          return false;
-        }  // SPT 에 빈공간 할당
-
-        // 2. 빈공간을 자식의 페이지를 SPT에서 다시 찾음
-        struct page *child_page = spt_find_page(dst, upage);
-        if (child_page == NULL) {
-          supplemental_page_table_kill(dst);
-          return false;
+      case VM_FILE: {
+        // 부모 파일-백드 메타데이터를 준비
+        if (real_type == VM_FILE) {
+          struct file_page *parent_fp = &parent_page->file;
+          // 자식 lazy 로딩용 aux 만들기
+          struct aux *child_aux = malloc(sizeof(struct aux));
+          if (child_aux == NULL) return false;
+          child_aux->ofs = parent_fp->ofs;
+          child_aux->read_bytes = parent_fp->read_bytes;
+          child_aux->zero_bytes = parent_fp->zero_bytes;
+          child_aux->mapping = NULL;
+#ifdef USERPROG
+          // 자식은 독립 file 핸들을 reopen으로 확보
+          child_aux->file = NULL;
+          if (parent_fp->file != NULL) {
+            lock_acquire(&filesys_lock);
+            child_aux->file = file_reopen(parent_fp->file);
+            lock_release(&filesys_lock);
+            if (child_aux->file == NULL) {
+              free(child_aux);
+              return false;
+            }
+          }
+#else
+          // USERPROG 비활성 시 동일 포인터 공유
+          child_aux->file = parent_fp->file;
+#endif
+          // 자식 SPT에 파일-backed UNINIT 페이지 등록
+          if (!vm_alloc_page_with_initializer(VM_FILE, upage, writable, mmap_lazy_load,
+                                              child_aux)) {
+            // 실패 시 reopen한 파일 닫고 aux 해제
+            if (child_aux->file != NULL && child_aux->file != parent_fp->file) {
+#ifdef USERPROG
+              lock_acquire(&filesys_lock);
+              file_close(child_aux->file);
+              lock_release(&filesys_lock);
+#endif
+            }
+            free(child_aux);
+            return false;
+          }
+          // 새로 등록된 자식 페이지를 찾아 프레임 복사 준비
+          struct page *child_page = spt_find_page(dst, upage);
+          if (child_page == NULL) return false;
+          // 부모가 이미 메모리에 있다면 자식도 즉시 복제
+          if (parent_page->frame != NULL) {
+            if (!vm_claim_page(child_page->va)) {
+              supplemental_page_table_kill(dst);
+              return false;
+            }
+            memcpy(child_page->frame->kva, parent_page->frame->kva, PGSIZE);
+          }
+        } else {
+          // 부모가 익명(혹은 다른 타입)일 땐 그대로 ANON 페이지로 복제
+          if (!vm_alloc_page_with_initializer(VM_ANON, upage, writable, NULL, NULL)) return false;
+          struct page *child_page = spt_find_page(dst, upage);
+          if (child_page == NULL) return false;
+          // 자식 페이지를 즉시 클레임한 뒤 데이터 복사
+          if (!vm_claim_page(child_page->va)) {
+            supplemental_page_table_kill(dst);
+            return false;
+          }
+          memcpy(child_page->frame->kva, parent_page->frame->kva, PGSIZE);
         }
-        // 3. 자식 페이지에 물리 프레임을 할당, 페이지 테이블에 매핑
-        if (!vm_claim_page(child_page->va)) {
-          supplemental_page_table_kill(dst);
-          return false;
-        }
-        memcpy(child_page->frame->kva, parent_page->frame->kva,
-               PGSIZE);  //빈공간에 부모 내용 자식에 쓰기 //커널 가상 주소(Kernel Virtual Address)
         break;
+      }
     }
   }
 

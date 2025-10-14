@@ -158,9 +158,15 @@ int exec(void *f_name) {
     return -1;
   }
   void *ptr = pg_round_down(f_name);  //페이지의 초깃값
+#ifdef VM
   if (spt_find_page(&thread_current()->spt, ptr) == NULL) {
     exit(-1);
   }
+#else
+  if (pml4_get_page(thread_current()->pml4, ptr) == NULL) {
+    exit(-1);
+  }
+#endif
 
   char file_name[128];
   memcpy(file_name, f_name, sizeof(file_name));
@@ -450,6 +456,11 @@ static void *sys_mmap(void *addr, size_t length, int writable_flag, int fd, off_
   // 3. 파일 성질/길이/재오픈
   // 파일 시스템 전역 락 획득. file은 공유 자원임
   lock_acquire(&filesys_lock);
+  // 파일이 디렉토리일 경우에도 실패
+  if (file_is_dir(file)) {
+    lock_release(&filesys_lock);
+    return NULL;
+  }
   // 매핑할 내용이 없을 경우 실패처리
   file_len = file_length(file);
   if (file_len <= 0) {
@@ -515,6 +526,25 @@ static void *sys_mmap(void *addr, size_t length, int writable_flag, int fd, off_
 }
 
 static void sys_munmap(void *addr) {
-  // TODO
+  if (addr == NULL || addr == 0) exit(-1);
+  if (pg_ofs(addr) != 0) exit(-1);
+  if (!is_user_vaddr(addr)) exit(-1);
+
+  struct thread *curr = thread_current();
+  struct mmap_mapping *target = NULL;
+
+  // 매핑 리스트 순회하며 타겟 객체 찾기
+  for (struct list_elem *e = list_begin(&curr->mmap_list); e != list_end(&curr->mmap_list);
+       e = list_next(e)) {
+    struct mmap_mapping *mapping = list_entry(e, struct mmap_mapping, elem);
+    if (mapping->start == addr) {
+      target = mapping;
+      break;
+    }
+  }
+  // 못찾았을 경우 실패 처리
+  if (target == NULL) exit(-1);
+
+  do_munmap(addr);
 }
 #endif

@@ -142,12 +142,14 @@ static void page_fault(struct intr_frame *f) {
   /* Count page faults. */
   page_fault_cnt++;
 
-  /* If the fault is true fault, show info and exit. */
-  printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
-         not_present ? "not present" : "rights violation", write ? "writing" : "reading",
-         user ? "user" : "kernel");
-  // kill (f);
+  // 사용자 모드에서의 페이지 폴트는 테스트 출력 오염을 막기 위해 조용히 종료
   if (user) {
     exit(-1);
   }
+  // 커널 모드에서의 폴트만 디버깅을 위한 상세 메시지를 출력하고 kill 처리
+  /* Kernel faults are unexpected: keep diagnostics. */
+  printf("Page fault at %p: %s error %s page in %s context.\n", fault_addr,
+         not_present ? "not present" : "rights violation", write ? "writing" : "reading",
+         user ? "user" : "kernel");
+  kill(f);
 }
