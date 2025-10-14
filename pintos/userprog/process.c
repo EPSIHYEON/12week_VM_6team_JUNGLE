@@ -37,6 +37,10 @@ static void __do_fork(void *);
 /* General process initializer for initd and other process. */
 static void process_init(void) { struct thread *current = thread_current(); }
 
+#ifdef VM
+static bool duplicate_mmap_mappings(struct thread *dst, struct thread *src);
+static void destroy_mmap_mappings(struct thread *t);
+#endif
 /* Starts the first userland program, called "initd", loaded from FILE_NAME.
  * The new thread may be scheduled (and may even exit)
  * before process_create_initd() returns. Returns the initd's
@@ -152,6 +156,96 @@ static bool duplicate_pte(uint64_t *pte, void *va, void *aux) {
 }
 #endif
 
+#ifdef VM
+// 스레드가 가진 mmap 매핑을 모두 정리 (파일 닫고 구조체 해제)
+static void destroy_mmap_mappings(struct thread *t) {
+  while (!list_empty(&t->mmap_list)) {
+    struct mmap_mapping *m = list_entry(list_pop_front(&t->mmap_list), struct mmap_mapping, elem);
+#ifdef USERPROG
+    lock_acquire(&filesys_lock);
+#endif
+    if (m->file != NULL) file_close(m->file);
+#ifdef USERPROG
+    lock_release(&filesys_lock);
+#endif
+    free(m);
+  }
+}
+
+// 부모(src)의 mmap 매핑을 자식(dst)에게 복제
+static bool duplicate_mmap_mappings(struct thread *dst, struct thread *src) {
+  if (list_empty(&src->mmap_list)) return true;
+
+  for (struct list_elem *e = list_begin(&src->mmap_list); e != list_end(&src->mmap_list);
+       e = list_next(e)) {
+    // 부모 매핑 정보를 새로 할당받아 자식용으로 채움
+    struct mmap_mapping *parent_map = list_entry(e, struct mmap_mapping, elem);
+    struct mmap_mapping *child_map = malloc(sizeof(struct mmap_mapping));
+    if (child_map == NULL) {
+      destroy_mmap_mappings(dst);
+      return false;
+    }
+    child_map->start = parent_map->start;
+    child_map->length = parent_map->length;
+    child_map->page_cnt = parent_map->page_cnt;
+    child_map->offset = parent_map->offset;
+    child_map->writable = parent_map->writable;
+    child_map->owner = dst;
+#ifdef USERPROG
+    lock_acquire(&filesys_lock);
+#endif
+    child_map->file = file_reopen(parent_map->file);
+#ifdef USERPROG
+    lock_release(&filesys_lock);
+#endif
+    // reopen 실패 시 지금까지 생성한 매핑 정리 후 실패 반환
+    if (child_map->file == NULL) {
+      free(child_map);
+      destroy_mmap_mappings(dst);
+      return false;
+    }
+    list_push_back(&dst->mmap_list, &child_map->elem);
+
+    // 매핑된 페이지 각각에 대해 파일 핸들과 매핑 포인터를 자식용으로 재설정
+    for (size_t i = 0; i < child_map->page_cnt; i++) {
+      void *upage = (uint8_t *)child_map->start + i * PGSIZE;
+      struct page *child_page = spt_find_page(&dst->spt, upage);
+      if (child_page == NULL) continue;
+      enum vm_type type = page_get_type(child_page);
+      if (type == VM_UNINIT) {
+        struct aux *aux = child_page->uninit.aux;
+        if (aux != NULL) {
+#ifdef USERPROG
+          // 기존 aux에 열린 다른 파일 핸들이 있다면 닫고 교체
+          if (aux->file != NULL && aux->file != child_map->file) {
+            lock_acquire(&filesys_lock);
+            file_close(aux->file);
+            lock_release(&filesys_lock);
+          }
+#endif
+          aux->file = child_map->file;
+          aux->mapping = child_map;
+        }
+      } else if (type == VM_FILE) {
+        struct file_page *fp = &child_page->file;
+#ifdef USERPROG
+        // 이미 연결돼 있던 파일 핸들이 있다면 닫고 자식 매핑으로 교체
+        if (fp->file != NULL && fp->file != child_map->file) {
+          lock_acquire(&filesys_lock);
+          file_close(fp->file);
+          lock_release(&filesys_lock);
+        }
+#endif
+        fp->file = child_map->file;
+        fp->mapping = child_map;
+      }
+    }
+  }
+
+  return true;
+}
+#endif
+
 /* A thread function that copies parent's execution context.
  * Hint) parent->tf does not hold the userland context of the process.
  *       That is, you are required to pass second argument of process_fork to
@@ -185,6 +279,7 @@ static void __do_fork(void *aux) {
 #ifdef VM
   supplemental_page_table_init(&current->spt);
   if (!supplemental_page_table_copy(&current->spt, &parent->spt)) goto error;
+  if (!duplicate_mmap_mappings(current, parent)) goto error;
 #else
   // 3. 부모의 페이지 테이블 내용을 자식의 페이지 테이블로 복사
   if (!pml4_for_each(parent->pml4, duplicate_pte, parent)) {
@@ -318,6 +413,14 @@ void process_exit(void) {
       // curr->fdt[fd] = NULL;
     }
   }
+#ifdef VM
+  // 매핑 객체 리스트 비우기
+  while (!list_empty(&curr->mmap_list)) {
+    struct mmap_mapping *mapping =
+        list_entry(list_front(&curr->mmap_list), struct mmap_mapping, elem);
+    do_munmap(mapping->start);
+  }
+#endif
   /* TODO: Your code goes here.
    * TODO: Implement process termination message (see
    * TODO: project2/process_termination.html).
@@ -460,6 +563,7 @@ static bool load(const char *file_name,
 
   /* Open executable file. */  //파일을 염(비어있는지만 확인)
   file = filesys_open(program_command);
+
   if (file == NULL) {
     printf("load: %s: open failed\n", program_command);
     goto done;
@@ -528,7 +632,6 @@ static bool load(const char *file_name,
 
   /* Set up stack. */  //스택 할당(빈 공간)
   if (!setup_stack(if_)) goto done;
-
   /* Start address. */  //시작 위치 지정
   if_->rip = ehdr.e_entry;
 
